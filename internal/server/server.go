@@ -108,19 +108,27 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	// Ensure cached copy exists (download if missing), and then stream a zip.
 	dir, err := s.store.EnsureRepo(ctx, user, repo, branch, token)
 	if err != nil {
+		fmt.Printf("download error user=%s repo=%s branch=%s err=%v\n", user, repo, branch, err)
 		httpError(w, "ensure repo", err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s.zip\"", safeName(repo, branch)))
+	w.WriteHeader(http.StatusOK)
 	zw := zip.NewWriter(w)
 	_ = s.store.Touch(s.userPath(user, "."))
 	if err := s.store.ZipPath(dir, zw); err != nil {
 		_ = zw.Close()
-		httpError(w, "zip", err)
+		fmt.Printf("zip error user=%s repo=%s branch=%s err=%v\n", user, repo, branch, err)
+		// Note: Cannot call httpError here as headers are already sent.
+		// The error will be visible in the zip file content or as incomplete response.
 		return
 	}
-	_ = zw.Close()
+	if err := zw.Close(); err != nil {
+		fmt.Printf("zip close error user=%s repo=%s branch=%s err=%v\n", user, repo, branch, err)
+		return
+	}
+	fmt.Printf("download ok user=%s repo=%s branch=%s dir=%s\n", user, repo, branch, dir)
 }
 
 func (s *Server) handleBranchSwitch(w http.ResponseWriter, r *http.Request) {
@@ -145,11 +153,16 @@ func (s *Server) handleBranchSwitch(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 	defer cancel()
 	if _, err := s.store.EnsureRepo(ctx, user, req.Repo, req.Branch, token); err != nil {
+		fmt.Printf("branch switch error user=%s repo=%s branch=%s err=%v\n", user, req.Repo, req.Branch, err)
 		httpError(w, "ensure branch", err)
 		return
 	}
 	w.WriteHeader(http.StatusOK)
-	_, _ = io.WriteString(w, "ok")
+	if _, err := io.WriteString(w, "ok"); err != nil {
+		fmt.Printf("branch switch write error user=%s repo=%s branch=%s err=%v\n", user, req.Repo, req.Branch, err)
+		return
+	}
+	fmt.Printf("branch switch ok user=%s repo=%s branch=%s\n", user, req.Repo, req.Branch)
 }
 
 func (s *Server) handleDirList(w http.ResponseWriter, r *http.Request) {
@@ -162,11 +175,16 @@ func (s *Server) handleDirList(w http.ResponseWriter, r *http.Request) {
 	_ = s.store.Touch(s.userPath(user, rel))
 	list, err := s.store.List(s.userPath(user, rel))
 	if err != nil {
+		fmt.Printf("dir list error user=%s path=%s err=%v\n", user, rel, err)
 		httpError(w, "list", err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(list)
+	if err := json.NewEncoder(w).Encode(list); err != nil {
+		fmt.Printf("dir list write error user=%s path=%s err=%v\n", user, rel, err)
+		return
+	}
+	fmt.Printf("dir list ok user=%s path=%s entries=%d\n", user, rel, len(list))
 }
 
 func (s *Server) handleDir(w http.ResponseWriter, r *http.Request) {
@@ -176,11 +194,16 @@ func (s *Server) handleDir(w http.ResponseWriter, r *http.Request) {
 		rel := r.URL.Query().Get("path")
 		recursive, _ := strconv.ParseBool(r.URL.Query().Get("recursive"))
 		if err := s.store.Delete(s.userPath(user, rel), recursive); err != nil {
+			fmt.Printf("delete error user=%s path=%s recursive=%t err=%v\n", user, rel, recursive, err)
 			httpError(w, "delete", err)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, "deleted")
+		if _, err := io.WriteString(w, "deleted"); err != nil {
+			fmt.Printf("delete write error user=%s path=%s recursive=%t err=%v\n", user, rel, recursive, err)
+			return
+		}
+		fmt.Printf("delete ok user=%s path=%s recursive=%t\n", user, rel, recursive)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}

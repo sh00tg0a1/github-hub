@@ -62,5 +62,6 @@ flowchart LR
 
 ## 相关文档
 - 英文 README：`README.md`
-- 应用使用说明：`README.app.md`
+- 应用使用说明（英文）：`README.app.md`
+- 应用使用说明（中文）：`README.app.zh.md`
 - 服务端配置示例：`configs/server.config.example.yaml`

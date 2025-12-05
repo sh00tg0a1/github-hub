@@ -53,11 +53,42 @@ func main() {
 	log.Fatal(srv.ListenAndServe())
 }
 
+type statusRecorder struct {
+	http.ResponseWriter
+	status     int
+	size       int
+	headerSent bool
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	if !r.headerSent {
+		r.status = code
+		r.headerSent = true
+		r.ResponseWriter.WriteHeader(code)
+	}
+}
+
+func (r *statusRecorder) Write(b []byte) (int, error) {
+	if r.status == 0 {
+		r.status = http.StatusOK
+		r.headerSent = true
+	}
+	n, err := r.ResponseWriter.Write(b)
+	r.size += n
+	return n, err
+}
+
 func logging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		next.ServeHTTP(w, r)
-		fmt.Printf("%s %s %s\n", r.Method, r.URL.Path, time.Since(start))
+		rec := &statusRecorder{ResponseWriter: w}
+		next.ServeHTTP(rec, r)
+		user := r.Header.Get("X-GHH-User")
+		if user == "" {
+			user = r.URL.Query().Get("user")
+		}
+		fmt.Printf("%s %s status=%d bytes=%d dur=%s user=%s\n",
+			r.Method, r.URL.Path, rec.status, rec.size, time.Since(start), strings.TrimSpace(user))
 	})
 }
 

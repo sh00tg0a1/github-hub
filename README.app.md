@@ -37,3 +37,4 @@ Practical workflows for running `ghh-server`, using the `ghh` CLI, and browsing 
 ## Related docs
 - English overview: `README.md`
 - 中文文档：`README.zh.md`
+- 应用指南（中文）：`README.app.zh.md`

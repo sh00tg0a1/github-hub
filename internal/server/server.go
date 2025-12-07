@@ -100,6 +100,9 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing repo", http.StatusBadRequest)
 		return
 	}
+	if branch == "" {
+		branch = "default"
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 	defer cancel()
 

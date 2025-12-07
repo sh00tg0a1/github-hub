@@ -255,6 +255,7 @@ func (s *Storage) CleanupExpired(ttl time.Duration) error {
 		}
 		if expired(path, cutoff) {
 			_ = os.Remove(path)
+			_ = os.Remove(path + ".meta")
 			trimEmpty(filepath.Dir(path), filepath.Join(s.Root, "users"))
 		}
 		return nil

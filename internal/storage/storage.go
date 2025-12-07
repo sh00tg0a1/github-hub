@@ -209,13 +209,14 @@ func (s *Storage) downloadZip(ctx context.Context, ownerRepo, branch, token, des
 	return nil
 }
 
-// Touch records access time for a relative path (dir). It ignores missing paths.
+// Touch records access time for a relative path (file or directory). It ignores missing paths.
 func (s *Storage) Touch(rel string) error {
 	abs, err := s.safeJoin(rel)
 	if err != nil {
 		return err
 	}
-	if info, err := os.Stat(abs); err == nil && info.IsDir() {
+	if _, err := os.Stat(abs); err == nil {
+		// Update timestamp for both files and directories
 		return s.touch(abs)
 	}
 	return nil

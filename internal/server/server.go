@@ -112,7 +112,9 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s.zip\"", safeName(repo, branch)))
-	_ = s.store.Touch(s.userPath(user, "."))
+	// Update access time for the zip file itself, not just the user directory
+	zipRelPath := s.userPath(user, filepath.Join("repos", repo, branch+".zip"))
+	_ = s.store.Touch(zipRelPath)
 	f, err := os.Open(zipPath)
 	if err != nil {
 		fmt.Printf("zip open error user=%s repo=%s branch=%s err=%v\n", user, repo, branch, err)

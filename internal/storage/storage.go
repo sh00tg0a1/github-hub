@@ -61,7 +61,7 @@ func (s *Storage) EnsureRepo(ctx context.Context, user, ownerRepo, branch, token
 		return "", err
 	}
 
-	// If we have cache and sha matches (or fetch failed), reuse.
+	// If we have cache and sha matches (or fetch failed but no cache), reuse.
 	if info, err := os.Stat(zipPath); err == nil && !info.IsDir() {
 		if remoteSHA != "" {
 			if cachedSHA, err := readSHA(metaPath); err == nil && cachedSHA == remoteSHA {
@@ -69,8 +69,7 @@ func (s *Storage) EnsureRepo(ctx context.Context, user, ownerRepo, branch, token
 				return zipPath, nil
 			}
 		} else if fetchErr != nil {
-			_ = s.touch(zipPath)
-			return zipPath, nil
+			// Cannot verify, force refresh
 		}
 	}
 
@@ -86,6 +85,7 @@ func (s *Storage) EnsureRepo(ctx context.Context, user, ownerRepo, branch, token
 		_ = os.Remove(tmpPath)
 		return "", err
 	}
+	_ = os.Remove(zipPath)
 	if err := os.Rename(tmpPath, zipPath); err != nil {
 		_ = os.Remove(tmpPath)
 		return "", err
@@ -115,7 +115,7 @@ func (s *Storage) List(rel string) ([]Entry, error) {
 	}
 	result := make([]Entry, 0, len(entries))
 	for _, e := range entries {
-		if e.Name() == ".last_access" {
+		if strings.HasSuffix(e.Name(), ".meta") {
 			continue
 		}
 		info, _ := e.Info()

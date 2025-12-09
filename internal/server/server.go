@@ -176,9 +176,14 @@ func (s *Server) handleDirList(w http.ResponseWriter, r *http.Request) {
 	_ = s.store.Touch(s.userPath(user, rel))
 	list, err := s.store.List(s.userPath(user, rel))
 	if err != nil {
-		fmt.Printf("dir list error user=%s path=%s err=%v\n", user, rel, err)
+		// Return empty list for not found paths (e.g., new user with no cached repos)
+		if errors.Is(err, storage.ErrNotFound) {
+			list = []storage.Entry{}
+		} else {
+			fmt.Printf("dir list error user=%s path=%s err=%v\n", user, rel, err)
 		httpError(w, "list", err)
 		return
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(list); err != nil {
@@ -277,7 +282,7 @@ func (s *Server) startJanitor() {
 		case <-s.janitorCtx.Done():
 			return
 		case <-ticker.C:
-			_ = s.store.CleanupExpired(s.ttl)
+		_ = s.store.CleanupExpired(s.ttl)
 		}
 	}
 }

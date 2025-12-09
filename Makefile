@@ -1,7 +1,14 @@
 GO ?= go
 BIN_DIR ?= bin
-SERVER_BIN := $(BIN_DIR)/ghh-server
-CLIENT_BIN := $(BIN_DIR)/ghh
+
+ifeq ($(OS),Windows_NT)
+    EXE_SUFFIX := .exe
+else
+    EXE_SUFFIX :=
+endif
+
+SERVER_BIN := $(BIN_DIR)/ghh-server$(EXE_SUFFIX)
+CLIENT_BIN := $(BIN_DIR)/ghh$(EXE_SUFFIX)
 
 .PHONY: all build build-server build-client test vet fmt
 

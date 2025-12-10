@@ -197,6 +197,89 @@ ghh rm --path <路径> [-r]
 | `--path` | ✅ | 远程路径 |
 | `-r` | ❌ | 递归删除目录 |
 
+## HTTP API 参考
+
+除了使用 `ghh` 客户端，你也可以直接通过 HTTP 接口访问服务器。
+
+### 下载仓库
+
+```bash
+# GET /api/v1/download
+# 参数: repo (必需), branch (可选), user (可选)
+
+# 基本用法 - 下载仓库默认分支
+curl -o repo.zip "http://localhost:8080/api/v1/download?repo=owner/repo"
+
+# 指定分支
+curl -o repo.zip "http://localhost:8080/api/v1/download?repo=owner/repo&branch=main"
+
+# 带用户隔离（用于缓存分组）
+curl -o repo.zip "http://localhost:8080/api/v1/download?repo=owner/repo&branch=main&user=alice"
+
+# 使用自定义 Token（访问私有仓库）
+curl -H "Authorization: Bearer ghp_xxxx" \
+     -o repo.zip "http://localhost:8080/api/v1/download?repo=owner/private-repo"
+
+# Windows PowerShell
+Invoke-WebRequest -Uri "http://localhost:8080/api/v1/download?repo=owner/repo" -OutFile repo.zip
+```
+
+| 参数/Header | 必需 | 说明 |
+|-------------|------|------|
+| `repo` | ✅ | 仓库标识，格式 `owner/repo` |
+| `branch` | ❌ | 分支名，留空则自动获取默认分支 |
+| `user` | ❌ | 用户名（也可通过 `X-GHH-User` header 传递） |
+| `Authorization` | ❌ | 格式 `Bearer <token>`，用于私有仓库 |
+
+### 预缓存分支
+
+```bash
+# POST /api/v1/branch/switch
+# Body: JSON {"repo": "owner/repo", "branch": "branch"}
+
+curl -X POST "http://localhost:8080/api/v1/branch/switch" \
+     -H "Content-Type: application/json" \
+     -d '{"repo": "owner/repo", "branch": "dev"}'
+
+# 带用户和 Token
+curl -X POST "http://localhost:8080/api/v1/branch/switch" \
+     -H "Content-Type: application/json" \
+     -H "X-GHH-User: alice" \
+     -H "Authorization: Bearer ghp_xxxx" \
+     -d '{"repo": "owner/repo", "branch": "feature"}'
+
+# Windows PowerShell
+Invoke-RestMethod -Uri "http://localhost:8080/api/v1/branch/switch" `
+    -Method Post -ContentType "application/json" `
+    -Body '{"repo": "owner/repo", "branch": "dev"}'
+```
+
+### 列出缓存
+
+```bash
+# GET /api/v1/dir/list
+# 参数: path (可选，默认 .)
+
+# 列出根目录
+curl "http://localhost:8080/api/v1/dir/list"
+
+# 列出指定路径
+curl "http://localhost:8080/api/v1/dir/list?path=repos/owner/repo"
+```
+
+### 删除缓存
+
+```bash
+# DELETE /api/v1/dir
+# 参数: path (必需), recursive (可选，默认 false)
+
+# 删除单个文件
+curl -X DELETE "http://localhost:8080/api/v1/dir?path=repos/owner/repo/main.zip"
+
+# 递归删除目录
+curl -X DELETE "http://localhost:8080/api/v1/dir?path=repos/owner/repo&recursive=true"
+```
+
 ## 路径和配置
 
 - 缓存布局：`data/users/<user>/repos/<owner>/<repo>/<branch>.zip`（仅存储 zip 文件，不解压到磁盘）；通过 `--root` 或服务端配置控制根目录。

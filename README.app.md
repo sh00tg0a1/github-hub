@@ -197,6 +197,89 @@ ghh rm --path <path> [-r]
 | `--path` | ✅ | Remote path |
 | `-r` | ❌ | Recursive delete |
 
+## HTTP API Reference
+
+You can also access the server directly via HTTP without the `ghh` client.
+
+### Download
+
+```bash
+# GET /api/v1/download
+# Params: repo (required), branch (optional), user (optional)
+
+# Basic usage - download default branch
+curl -o repo.zip "http://localhost:8080/api/v1/download?repo=owner/repo"
+
+# With specific branch
+curl -o repo.zip "http://localhost:8080/api/v1/download?repo=owner/repo&branch=main"
+
+# With user isolation (for cache grouping)
+curl -o repo.zip "http://localhost:8080/api/v1/download?repo=owner/repo&branch=main&user=alice"
+
+# With custom token (for private repos)
+curl -H "Authorization: Bearer ghp_xxxx" \
+     -o repo.zip "http://localhost:8080/api/v1/download?repo=owner/private-repo"
+
+# Windows PowerShell
+Invoke-WebRequest -Uri "http://localhost:8080/api/v1/download?repo=owner/repo" -OutFile repo.zip
+```
+
+| Param/Header | Required | Description |
+|--------------|----------|-------------|
+| `repo` | ✅ | Repository identifier, format `owner/repo` |
+| `branch` | ❌ | Branch name, auto-detects default if empty |
+| `user` | ❌ | User name (can also use `X-GHH-User` header) |
+| `Authorization` | ❌ | Format `Bearer <token>`, for private repos |
+
+### Branch Switch
+
+```bash
+# POST /api/v1/branch/switch
+# Body: JSON {"repo": "owner/repo", "branch": "branch"}
+
+curl -X POST "http://localhost:8080/api/v1/branch/switch" \
+     -H "Content-Type: application/json" \
+     -d '{"repo": "owner/repo", "branch": "dev"}'
+
+# With user and token
+curl -X POST "http://localhost:8080/api/v1/branch/switch" \
+     -H "Content-Type: application/json" \
+     -H "X-GHH-User: alice" \
+     -H "Authorization: Bearer ghp_xxxx" \
+     -d '{"repo": "owner/repo", "branch": "feature"}'
+
+# Windows PowerShell
+Invoke-RestMethod -Uri "http://localhost:8080/api/v1/branch/switch" `
+    -Method Post -ContentType "application/json" `
+    -Body '{"repo": "owner/repo", "branch": "dev"}'
+```
+
+### List Directory
+
+```bash
+# GET /api/v1/dir/list
+# Params: path (optional, defaults to .)
+
+# List root directory
+curl "http://localhost:8080/api/v1/dir/list"
+
+# List specific path
+curl "http://localhost:8080/api/v1/dir/list?path=repos/owner/repo"
+```
+
+### Delete
+
+```bash
+# DELETE /api/v1/dir
+# Params: path (required), recursive (optional, defaults to false)
+
+# Delete single file
+curl -X DELETE "http://localhost:8080/api/v1/dir?path=repos/owner/repo/main.zip"
+
+# Delete directory recursively
+curl -X DELETE "http://localhost:8080/api/v1/dir?path=repos/owner/repo&recursive=true"
+```
+
 ## Paths and configuration
 
 - Cache layout: `data/users/<user>/repos/<owner>/<repo>/<branch>.zip` (archives only, no extraction on disk); control root with `--root` or server config.

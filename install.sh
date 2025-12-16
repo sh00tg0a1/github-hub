@@ -46,8 +46,10 @@ pick_bin() {
 CLIENT_BIN="$(pick_bin ghh "$OS_NAME" "$ARCH_NAME" "$ROOT_DIR")"
 SERVER_BIN="$(pick_bin ghh-server "$OS_NAME" "$ARCH_NAME" "$ROOT_DIR")"
 
-echo "Building static binaries..."
-make build-static
+if [[ ! -f "$CLIENT_BIN" || ! -f "$SERVER_BIN" ]]; then
+  echo "缺少二进制文件：请先在仓库根目录执行 make build-static 或自行构建 ghh/ghh-server" >&2
+  exit 1
+fi
 
 echo "Installing to $BIN_DIR..."
 sudo install -d "$BIN_DIR"

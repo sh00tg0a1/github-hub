@@ -11,6 +11,7 @@ VERSION_INPUT="${1:-}"
 VERSION="${VERSION_INPUT:-${VERSION:-main}}"
 ARCHIVE_NAME="${ARCHIVE_NAME:-ghh-$VERSION.tar.gz}"
 ARCHIVE_PATH="$DIST_DIR/$ARCHIVE_NAME"
+ARCHIVE_DIR_NAME="${ARCHIVE_DIR_NAME:-${ARCHIVE_NAME%.tar.gz}}"
 
 if [[ ! -d "$BIN_DIR" ]] || [[ -z "$(ls -A "$BIN_DIR" 2>/dev/null)" ]]; then
   echo "bin/ 为空，请先构建客户端和服务端（二进制）" >&2
@@ -38,7 +39,7 @@ fi
 mkdir -p "$DIST_DIR"
 
 TMP_DIR="$(mktemp -d "$DIST_DIR/.pkg.XXXXXX")"
-PKG_ROOT="$TMP_DIR/$ARCHIVE_NAME"
+PKG_ROOT="$TMP_DIR/$ARCHIVE_DIR_NAME"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 mkdir -p "$PKG_ROOT"
@@ -47,8 +48,8 @@ cp -a "$BIN_DIR" "$PKG_ROOT/"
 cp -a "$CONFIG_CLIENT" "$CONFIG_SERVER" "$PKG_ROOT/"
 cp -a "$ROOT/README.app.md" "$ROOT/README.app.zh.md" "$PKG_ROOT/"
 
-# 以 $ARCHIVE_NAME 为顶层目录进行打包
-tar -czf "$ARCHIVE_PATH" -C "$TMP_DIR" "$ARCHIVE_NAME"
+# 以 $ARCHIVE_DIR_NAME 为顶层目录进行打包
+tar -czf "$ARCHIVE_PATH" -C "$TMP_DIR" "$ARCHIVE_DIR_NAME"
 
-echo "已生成归档（顶层目录：$ARCHIVE_NAME）：$ARCHIVE_PATH"
+echo "已生成归档（顶层目录：$ARCHIVE_DIR_NAME）：$ARCHIVE_PATH"
 

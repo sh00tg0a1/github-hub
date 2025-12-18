@@ -71,6 +71,7 @@ func (c *Client) Download(ctx context.Context, repo, branch, zipPath, extractDir
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		return &HTTPError{StatusCode: resp.StatusCode, Message: "download failed", Body: string(body)}
 	}
+	commit := strings.TrimSpace(resp.Header.Get("X-GHH-Commit"))
 
 	// Remove existing zip file if it exists
 	if err := os.RemoveAll(zipPath); err != nil {
@@ -102,7 +103,65 @@ func (c *Client) Download(ctx context.Context, repo, branch, zipPath, extractDir
 		fmt.Printf("extracted to %s\n", extractDir)
 	}
 
+	commitPath := ""
+	if extractDir != "" {
+		commitPath = filepath.Join(extractDir, "commit.txt")
+	} else {
+		commitPath = zipPath + ".commit.txt"
+	}
+	if commit != "" {
+		if err := os.WriteFile(commitPath, []byte(commit+"\n"), 0o644); err != nil {
+			fmt.Printf("warning: failed to save commit info to %s: %v\n", commitPath, err)
+		} else {
+			fmt.Printf("saved commit to %s\n", commitPath)
+		}
+	} else {
+		commitFetched := c.fetchCommit(ctx, repo, branch)
+		if commitFetched != "" {
+			if err := os.WriteFile(commitPath, []byte(commitFetched+"\n"), 0o644); err != nil {
+				fmt.Printf("warning: failed to save commit info to %s: %v\n", commitPath, err)
+			} else {
+				fmt.Printf("saved commit to %s\n", commitPath)
+			}
+		} else {
+			fmt.Println("warning: commit info not provided by server")
+		}
+	}
+
 	return nil
+}
+
+func (c *Client) fetchCommit(ctx context.Context, repo, branch string) string {
+	q := url.Values{}
+	if !strings.Contains(c.Endpoint.DownloadCommit, "{repo}") {
+		q.Set("repo", repo)
+	}
+	if strings.TrimSpace(branch) != "" && !strings.Contains(c.Endpoint.DownloadCommit, "{branch}") {
+		q.Set("branch", branch)
+	}
+	path := replacePlaceholders(c.Endpoint.DownloadCommit, map[string]string{"repo": repo, "branch": branch, "path": ""})
+	endpoint := c.fullURL(path, q)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return ""
+	}
+	c.addAuth(req)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return ""
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return ""
+	}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
 }
 
 // SwitchBranch requests a branch switch on the server for the given repo.
@@ -223,18 +282,20 @@ func (c *Client) addAuth(req *http.Request) {
 
 // Endpoints provides API path templates.
 type Endpoints struct {
-	Download     string
-	BranchSwitch string
-	DirList      string
-	DirDelete    string
+	Download       string
+	DownloadCommit string
+	BranchSwitch   string
+	DirList        string
+	DirDelete      string
 }
 
 func DefaultEndpoints() Endpoints {
 	return Endpoints{
-		Download:     "/api/v1/download",
-		BranchSwitch: "/api/v1/branch/switch",
-		DirList:      "/api/v1/dir/list",
-		DirDelete:    "/api/v1/dir",
+		Download:       "/api/v1/download",
+		DownloadCommit: "/api/v1/download/commit",
+		BranchSwitch:   "/api/v1/branch/switch",
+		DirList:        "/api/v1/dir/list",
+		DirDelete:      "/api/v1/dir",
 	}
 }
 

@@ -98,10 +98,17 @@ func (s *Storage) EnsureRepo(ctx context.Context, user, ownerRepo, branch, token
 		return "", err
 	}
 
+	commitPath := strings.TrimSuffix(zipPath, ".zip") + ".commit.txt"
 	if remoteSHA != "" {
 		_ = writeSHA(metaPath, remoteSHA)
+		short := remoteSHA
+		if len(short) > 7 {
+			short = short[:7]
+		}
+		_ = writeSHA(commitPath, short)
 	} else {
 		_ = os.Remove(metaPath)
+		// 若无法获取远端 SHA，则保持已有 commit 文件（如果存在），不强删
 	}
 	_ = s.touch(zipPath)
 	return zipPath, nil
@@ -263,6 +270,7 @@ func (s *Storage) CleanupExpired(ttl time.Duration) error {
 		if expired(path, cutoff) {
 			_ = os.Remove(path)
 			_ = os.Remove(path + ".meta")
+			_ = os.Remove(strings.TrimSuffix(path, ".zip") + ".commit.txt")
 			trimEmpty(filepath.Dir(path), filepath.Join(s.Root, "users"))
 		}
 		return nil

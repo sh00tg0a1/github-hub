@@ -79,6 +79,7 @@ func NewServerWithStore(store Store, githubToken, defaultUser string) *Server {
 
 func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/download", s.handleDownload)
+	mux.HandleFunc("/api/v1/download/commit", s.handleDownloadCommit)
 	mux.HandleFunc("/api/v1/branch/switch", s.handleBranchSwitch)
 	mux.HandleFunc("/api/v1/dir/list", s.handleDirList)
 	mux.HandleFunc("/api/v1/dir", s.handleDir)
@@ -113,6 +114,10 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	// Extract actual branch name from zipPath (e.g., "main.zip" -> "main")
 	actualBranch := strings.TrimSuffix(filepath.Base(zipPath), ".zip")
+	commitPath := strings.TrimSuffix(zipPath, ".zip") + ".commit.txt"
+	if commit := readCommitFile(commitPath); commit != "" {
+		w.Header().Set("X-GHH-Commit", commit)
+	}
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s.zip\"", safeName(repo, actualBranch)))
 	// Update access time for the zip file itself
@@ -130,6 +135,38 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fmt.Printf("download ok user=%s repo=%s branch=%s zip=%s\n", user, repo, actualBranch, zipPath)
+}
+
+func (s *Server) handleDownloadCommit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	user := s.resolveUser(r)
+	token := tokenFromRequest(r, s.token)
+	repo := strings.TrimSpace(r.URL.Query().Get("repo"))
+	branch := strings.TrimSpace(r.URL.Query().Get("branch"))
+	if repo == "" {
+		http.Error(w, "missing repo", http.StatusBadRequest)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	defer cancel()
+
+	zipPath, err := s.store.EnsureRepo(ctx, user, repo, branch, token)
+	if err != nil {
+		fmt.Printf("download commit error user=%s repo=%s branch=%s err=%v\n", user, repo, branch, err)
+		httpError(w, "ensure repo", err)
+		return
+	}
+	commitPath := strings.TrimSuffix(zipPath, ".zip") + ".commit.txt"
+	commit := readCommitFile(commitPath)
+	if commit == "" {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write([]byte(commit + "\n"))
 }
 
 func (s *Server) handleBranchSwitch(w http.ResponseWriter, r *http.Request) {
@@ -260,6 +297,15 @@ func sanitizeUser(u string) string {
 	u = strings.ReplaceAll(u, "\\", "-")
 	u = strings.ReplaceAll(u, "/", "-")
 	return u
+}
+
+func readCommitFile(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	commit := strings.TrimSpace(string(b))
+	return commit
 }
 
 func tokenFromRequest(r *http.Request, fallback string) string {

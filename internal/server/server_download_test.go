@@ -5,10 +5,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -38,6 +40,9 @@ func TestDownloadHandler_UsesStore(t *testing.T) {
 	tmpDir := t.TempDir()
 	zipPath := filepath.Join(tmpDir, "repo.zip")
 	createZip(t, zipPath)
+	if err := os.WriteFile(zipPath+".commit.txt", []byte("abc123\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	fs := &fakeStore{ensurePath: zipPath}
 	s := NewServerWithStore(fs, "", "default")
@@ -57,6 +62,9 @@ func TestDownloadHandler_UsesStore(t *testing.T) {
 	if ct := resp.Header.Get("Content-Type"); ct != "application/zip" {
 		t.Fatalf("ct=%s", ct)
 	}
+	if resp.Header.Get("X-GHH-Commit") != "abc123" {
+		t.Fatalf("commit header mismatch: %q", resp.Header.Get("X-GHH-Commit"))
+	}
 
 	// Validate it's a zip
 	var buf bytes.Buffer
@@ -73,6 +81,35 @@ func TestDownloadHandler_UsesStore(t *testing.T) {
 
 	if fs.lastRepo != "own/repo" || fs.lastBranch != "main" || fs.lastUser != "default" {
 		t.Fatalf("store called with user=%s repo=%s branch=%s", fs.lastUser, fs.lastRepo, fs.lastBranch)
+	}
+}
+
+func TestDownloadCommitHandler(t *testing.T) {
+	tmpDir := t.TempDir()
+	zipPath := filepath.Join(tmpDir, "repo.zip")
+	createZip(t, zipPath)
+	if err := os.WriteFile(zipPath+".commit.txt", []byte("deadbeef\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fs := &fakeStore{ensurePath: zipPath}
+	s := NewServerWithStore(fs, "", "default")
+	mux := http.NewServeMux()
+	s.RegisterRoutes(mux)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/api/v1/download/commit?repo=own/repo&branch=main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if strings.TrimSpace(string(body)) != "deadbeef" {
+		t.Fatalf("commit body mismatch: %q", string(body))
 	}
 }
 

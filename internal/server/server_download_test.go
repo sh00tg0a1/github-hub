@@ -19,10 +19,12 @@ import (
 
 type fakeStore struct {
 	ensurePath string
+	ensurePkg  string
 	ensureErr  error
 	lastUser   string
 	lastRepo   string
 	lastBranch string
+	lastPkgURL string
 }
 
 func (f *fakeStore) EnsureRepo(ctx context.Context, user, ownerRepo, branch, token string) (string, error) {
@@ -30,6 +32,11 @@ func (f *fakeStore) EnsureRepo(ctx context.Context, user, ownerRepo, branch, tok
 	f.lastRepo = ownerRepo
 	f.lastBranch = branch
 	return f.ensurePath, f.ensureErr
+}
+func (f *fakeStore) EnsurePackage(ctx context.Context, user, pkgURL string) (string, error) {
+	f.lastUser = user
+	f.lastRepo = pkgURL
+	return f.ensurePkg, f.ensureErr
 }
 func (f *fakeStore) List(rel string) ([]storage.Entry, error) { return nil, nil }
 func (f *fakeStore) Delete(rel string, recursive bool) error  { return nil }
@@ -110,6 +117,37 @@ func TestDownloadCommitHandler(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	if strings.TrimSpace(string(body)) != "deadbeef" {
 		t.Fatalf("commit body mismatch: %q", string(body))
+	}
+}
+
+func TestDownloadPackageHandler_UsesStore(t *testing.T) {
+	tmpDir := t.TempDir()
+	pkgPath := filepath.Join(tmpDir, "pkg.tar.gz")
+	if err := os.WriteFile(pkgPath, []byte("pkgdata"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fs := &fakeStore{ensurePkg: pkgPath}
+	s := NewServerWithStore(fs, "", "default")
+	mux := http.NewServeMux()
+	s.RegisterRoutes(mux)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/api/v1/download/package?url=https://example.com/pkg.tar.gz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	data, _ := io.ReadAll(resp.Body)
+	if string(data) != "pkgdata" {
+		t.Fatalf("unexpected pkg data: %q", string(data))
+	}
+	if fs.lastRepo != "https://example.com/pkg.tar.gz" {
+		t.Fatalf("store called with repo=%s", fs.lastRepo)
 	}
 }
 

@@ -2,6 +2,8 @@ package storage
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,6 +29,79 @@ type Storage struct {
 	lock map[string]*sync.Mutex
 }
 
+func sanitizeName(v string) string {
+	v = strings.TrimSpace(v)
+	v = strings.ReplaceAll(v, "\\", "-")
+	v = strings.ReplaceAll(v, "/", "-")
+	return v
+}
+
+// EnsurePackage caches a package archive downloaded from pkgURL under:
+// <root>/users/<user>/packages/<name>/<url-hash>/<filename>
+func (s *Storage) EnsurePackage(ctx context.Context, user, pkgURL string) (string, error) {
+	user = sanitizeName(strings.Trim(user, "/ "))
+	if user == "" {
+		user = "default"
+	}
+	if user == "." || strings.Contains(user, "..") {
+		return "", fmt.Errorf("invalid user: %w", ErrBadPath)
+	}
+
+	u, _ := url.Parse(pkgURL)
+	filename := ""
+	if u != nil {
+		filename = filepath.Base(u.Path)
+	}
+	if filename == "" || filename == "." || filename == "/" {
+		filename = filepath.Base(pkgURL)
+	}
+	if filename == "" || filename == "." || filename == "/" {
+		filename = "package.bin"
+	}
+	name := filename
+	if idx := strings.Index(name, "."); idx > 0 {
+		name = name[:idx]
+	}
+	name = sanitizeName(name)
+
+	hash := sha256.Sum256([]byte(pkgURL))
+	hashStr := hex.EncodeToString(hash[:])
+	if len(hashStr) > 12 {
+		hashStr = hashStr[:12]
+	}
+
+	pkgDir := filepath.Join(s.Root, "users", user, "packages", name, hashStr)
+	pkgPath := filepath.Join(pkgDir, filename)
+
+	// If exists, reuse
+	if info, err := os.Stat(pkgPath); err == nil && !info.IsDir() {
+		_ = s.touch(pkgPath)
+		return pkgPath, nil
+	}
+
+	if err := os.MkdirAll(pkgDir, 0o755); err != nil {
+		return "", err
+	}
+	tmpFile, err := os.CreateTemp(pkgDir, ".tmp-package-*.bin")
+	if err != nil {
+		return "", err
+	}
+	tmpPath := tmpFile.Name()
+	tmpFile.Close()
+
+	if err := s.downloadFile(ctx, pkgURL, tmpPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", err
+	}
+	_ = os.Remove(pkgPath)
+	if err := os.Rename(tmpPath, pkgPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", err
+	}
+	_ = s.touch(pkgPath)
+	return pkgPath, nil
+}
+
 func New(root string) *Storage { return &Storage{Root: root} }
 
 // EnsureRepo ensures a cached repo (owner/repo) at branch exists under workspace.
@@ -43,6 +118,7 @@ func (s *Storage) EnsureRepo(ctx context.Context, user, ownerRepo, branch, token
 	if strings.ContainsRune(user, '/') || strings.ContainsRune(user, '\\') {
 		return "", fmt.Errorf("invalid user: %w", ErrBadPath)
 	}
+	user = sanitizeName(user)
 	ownerRepo = strings.Trim(ownerRepo, "/")
 	if ownerRepo == "" || strings.Count(ownerRepo, "/") != 1 {
 		return "", fmt.Errorf("owner/repo expected: %w", ErrBadPath)
@@ -223,6 +299,31 @@ func (s *Storage) downloadZip(ctx context.Context, ownerRepo, branch, token, des
 	return nil
 }
 
+func (s *Storage) downloadFile(ctx context.Context, fileURL, dest string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fileURL, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		return fmt.Errorf("download failed: %s", string(b))
+	}
+	out, err := os.Create(dest)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	if _, err := io.Copy(out, resp.Body); err != nil {
+		return err
+	}
+	return nil
+}
+
 // Touch records access time for a relative path (file or directory). It ignores missing paths.
 func (s *Storage) Touch(rel string) error {
 	abs, err := s.safeJoin(rel)
@@ -241,7 +342,9 @@ func (s *Storage) touch(abs string) error {
 	return os.Chtimes(abs, now, now)
 }
 
-// CleanupExpired removes repos unused beyond ttl under users/*/repos/*/*/<branch>.
+// CleanupExpired removes cached items unused beyond ttl.
+// - Repos: users/<user>/repos/<owner>/<repo>/<branch>.zip (+.meta, commit)
+// - Packages: users/<user>/packages/** (any file)
 func (s *Storage) CleanupExpired(ttl time.Duration) error {
 	cutoff := time.Now().Add(-ttl)
 	root := filepath.Join(s.Root, "users")
@@ -258,20 +361,32 @@ func (s *Storage) CleanupExpired(ttl time.Duration) error {
 		if d.IsDir() {
 			return nil
 		}
-		if filepath.Ext(path) != ".zip" {
-			return nil
-		}
 		rel, _ := filepath.Rel(s.Root, path)
 		parts := splitPath(rel)
-		// expect users/<user>/repos/<owner>/<repo>/<branch>.zip
-		if len(parts) < 6 || parts[0] != "users" || parts[2] != "repos" {
+		if len(parts) < 3 || parts[0] != "users" {
 			return nil
 		}
-		if expired(path, cutoff) {
-			_ = os.Remove(path)
-			_ = os.Remove(path + ".meta")
-			_ = os.Remove(strings.TrimSuffix(path, ".zip") + ".commit.txt")
-			trimEmpty(filepath.Dir(path), filepath.Join(s.Root, "users"))
+
+		switch parts[2] {
+		case "repos":
+			// expect users/<user>/repos/<owner>/<repo>/<branch>.zip
+			if filepath.Ext(path) != ".zip" || len(parts) < 6 {
+				return nil
+			}
+			if expired(path, cutoff) {
+				_ = os.Remove(path)
+				_ = os.Remove(path + ".meta")
+				_ = os.Remove(strings.TrimSuffix(path, ".zip") + ".commit.txt")
+				trimEmpty(filepath.Dir(path), filepath.Join(s.Root, "users"))
+			}
+		case "packages":
+			// any package file under users/<user>/packages/**
+			if expired(path, cutoff) {
+				_ = os.Remove(path)
+				trimEmpty(filepath.Dir(path), filepath.Join(s.Root, "users"))
+			}
+		default:
+			return nil
 		}
 		return nil
 	})

@@ -29,8 +29,10 @@
     <button id="go">打开</button>
     <button id="up">上一级</button>
     <button id="refresh">刷新</button>
+    <button id="goto-packages">包缓存</button>
+    <button id="goto-repos">代码缓存</button>
     <input id="filter" type="text" placeholder="搜索名称或路径（本地过滤）" />
-    <span class="muted">工作区根为服务端配置的 root 目录</span>
+    <span class="muted">工作区根为服务端配置的 root 目录（相对路径，如 packages/... 或 repos/...）</span>
   </div>
   <table>
     <thead>
@@ -152,6 +154,8 @@
       openPath(segs.length ? segs.join('/') : '.');
     };
     $('#refresh').onclick = ()=> openPath(pathInput.value);
+    $('#goto-packages').onclick = ()=> openPath('packages');
+    $('#goto-repos').onclick = ()=> openPath('repos');
     $('#filter').oninput = ()=> render(currentData);
 
     // 默认打开 repos 目录

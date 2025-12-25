@@ -41,6 +41,44 @@ type HTTPError struct {
 
 func (e *HTTPError) Error() string { return fmt.Sprintf("http %d: %s", e.StatusCode, e.Message) }
 
+// DownloadPackage downloads a release/package file by URL with server-side caching keyed by URL hash.
+func (c *Client) DownloadPackage(ctx context.Context, pkgURL, destPath string) error {
+	q := url.Values{}
+	if !strings.Contains(c.Endpoint.DownloadPackage, "{url}") {
+		q.Set("url", pkgURL)
+	}
+	path := replacePlaceholders(c.Endpoint.DownloadPackage, map[string]string{"url": pkgURL, "path": ""})
+	endpoint := c.fullURL(path, q)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	c.addAuth(req)
+	req.Header.Set("Accept", "application/octet-stream")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		return &HTTPError{StatusCode: resp.StatusCode, Message: "download package failed", Body: string(body)}
+	}
+
+	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(destPath); err != nil {
+		return fmt.Errorf("remove existing file: %w", err)
+	}
+	if err := writeStreamToFile(destPath, resp.Body); err != nil {
+		return err
+	}
+	fmt.Printf("saved package to %s\n", destPath)
+	return nil
+}
+
 // Download downloads repository code as an archive from the server.
 // zipPath: where to save the zip file (always saved)
 // extractDir: if non-empty, extract the zip to this directory after download
@@ -282,20 +320,24 @@ func (c *Client) addAuth(req *http.Request) {
 
 // Endpoints provides API path templates.
 type Endpoints struct {
-	Download       string
-	DownloadCommit string
-	BranchSwitch   string
-	DirList        string
-	DirDelete      string
+	Download        string
+	DownloadCommit  string
+	BranchSwitch    string
+	DirList         string
+	DirDelete       string
+	ServerVersion   string
+	DownloadPackage string
 }
 
 func DefaultEndpoints() Endpoints {
 	return Endpoints{
-		Download:       "/api/v1/download",
-		DownloadCommit: "/api/v1/download/commit",
-		BranchSwitch:   "/api/v1/branch/switch",
-		DirList:        "/api/v1/dir/list",
-		DirDelete:      "/api/v1/dir",
+		Download:        "/api/v1/download",
+		DownloadCommit:  "/api/v1/download/commit",
+		BranchSwitch:    "/api/v1/branch/switch",
+		DirList:         "/api/v1/dir/list",
+		DirDelete:       "/api/v1/dir",
+		ServerVersion:   "/api/v1/version",
+		DownloadPackage: "/api/v1/download/package",
 	}
 }
 

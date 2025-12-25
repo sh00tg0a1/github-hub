@@ -24,6 +24,7 @@ var uiFS embed.FS
 // Store is the abstraction for workspace/cache storage used by the server.
 type Store interface {
 	EnsureRepo(ctx context.Context, user, ownerRepo, branch, token string) (string, error)
+	EnsurePackage(ctx context.Context, user, pkgURL string) (string, error)
 	List(rel string) ([]storage.Entry, error)
 	Delete(rel string, recursive bool) error
 	Touch(rel string) error
@@ -80,6 +81,7 @@ func NewServerWithStore(store Store, githubToken, defaultUser string) *Server {
 func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/download", s.handleDownload)
 	mux.HandleFunc("/api/v1/download/commit", s.handleDownloadCommit)
+	mux.HandleFunc("/api/v1/download/package", s.handleDownloadPackage)
 	mux.HandleFunc("/api/v1/branch/switch", s.handleBranchSwitch)
 	mux.HandleFunc("/api/v1/dir/list", s.handleDirList)
 	mux.HandleFunc("/api/v1/dir", s.handleDir)
@@ -169,6 +171,43 @@ func (s *Server) handleDownloadCommit(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(commit + "\n"))
 }
 
+func (s *Server) handleDownloadPackage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	user := s.resolveUser(r)
+	pkgURL := strings.TrimSpace(r.URL.Query().Get("url"))
+	if pkgURL == "" {
+		http.Error(w, "missing url", http.StatusBadRequest)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	defer cancel()
+
+	filePath, err := s.store.EnsurePackage(ctx, user, pkgURL)
+	if err != nil {
+		fmt.Printf("download package error user=%s url=%s err=%v\n", user, pkgURL, err)
+		httpError(w, "ensure package", err)
+		return
+	}
+	name := filepath.Base(filePath)
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", name))
+	_ = s.store.Touch(s.userPath(user, filepath.Join("packages", name)))
+	f, err := os.Open(filePath)
+	if err != nil {
+		httpError(w, "open package", err)
+		return
+	}
+	defer f.Close()
+	if _, err := io.Copy(w, f); err != nil {
+		fmt.Printf("package stream error user=%s url=%s err=%v\n", user, pkgURL, err)
+		return
+	}
+	fmt.Printf("package download ok user=%s url=%s path=%s\n", user, pkgURL, filePath)
+}
+
 func (s *Server) handleBranchSwitch(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -224,6 +263,16 @@ func (s *Server) handleDirList(w http.ResponseWriter, r *http.Request) {
 			fmt.Printf("dir list error user=%s path=%s err=%v\n", user, rel, err)
 			httpError(w, "list", err)
 			return
+		}
+	}
+	// Rewrite paths to be relative to user root (no users/<user> prefix), so UI can delete correctly.
+	cleanRel := strings.TrimLeft(filepath.ToSlash(rel), "./")
+	for i := range list {
+		name := list[i].Name
+		if cleanRel == "" || cleanRel == "." {
+			list[i].Path = name
+		} else {
+			list[i].Path = filepath.ToSlash(filepath.Join(cleanRel, name))
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")

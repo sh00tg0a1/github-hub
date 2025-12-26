@@ -10,17 +10,19 @@ import (
 
 // Config holds server defaults for root path, auth token, and default user grouping.
 type Config struct {
-	Addr        string `json:"addr"`
-	Root        string `json:"root"`
-	Token       string `json:"token"`
-	DefaultUser string `json:"default_user"`
+	Addr            string `json:"addr"`
+	Root            string `json:"root"`
+	Token           string `json:"token"`
+	DefaultUser     string `json:"default_user"`
+	DownloadTimeout string `json:"download_timeout"` // e.g. "10m", "5m"
 }
 
 func DefaultConfig() Config {
 	return Config{
-		Addr:        ":8080",
-		Root:        "data",
-		DefaultUser: "default",
+		Addr:            ":8080",
+		Root:            "data",
+		DefaultUser:     "default",
+		DownloadTimeout: "10m",
 	}
 }
 
@@ -93,6 +95,10 @@ func parseYAMLConfig(s string) (Config, error) {
 		case "default_user":
 			if v != "" {
 				cfg.DefaultUser = v
+			}
+		case "download_timeout":
+			if v != "" {
+				cfg.DownloadTimeout = v
 			}
 		}
 	}

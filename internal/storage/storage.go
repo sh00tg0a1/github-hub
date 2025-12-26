@@ -36,8 +36,15 @@ func sanitizeName(v string) string {
 	return v
 }
 
+// PackageHash returns a short hash for a package URL.
+func PackageHash(pkgURL string) string {
+	hash := sha256.Sum256([]byte(pkgURL))
+	hashStr := hex.EncodeToString(hash[:])
+	return hashStr[:20] // use first 20 hex chars to reduce collision risk
+}
+
 // EnsurePackage caches a package archive downloaded from pkgURL under:
-// <root>/users/<user>/packages/<name>/<url-hash>/<filename>
+// <root>/users/<user>/packages/<url-hash>/<filename>
 func (s *Storage) EnsurePackage(ctx context.Context, user, pkgURL string) (string, error) {
 	user = sanitizeName(strings.Trim(user, "/ "))
 	if user == "" {
@@ -64,13 +71,9 @@ func (s *Storage) EnsurePackage(ctx context.Context, user, pkgURL string) (strin
 	}
 	name = sanitizeName(name)
 
-	hash := sha256.Sum256([]byte(pkgURL))
-	hashStr := hex.EncodeToString(hash[:])
-	if len(hashStr) > 12 {
-		hashStr = hashStr[:12]
-	}
+	hashStr := PackageHash(pkgURL)
 
-	pkgDir := filepath.Join(s.Root, "users", user, "packages", name, hashStr)
+	pkgDir := filepath.Join(s.Root, "users", user, "packages", hashStr)
 	pkgPath := filepath.Join(pkgDir, filename)
 
 	// If exists, reuse

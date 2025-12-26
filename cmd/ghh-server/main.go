@@ -29,6 +29,7 @@ func main() {
 	root := cfg.Root
 	token := cfg.Token
 	defaultUser := cfg.DefaultUser
+	downloadTO := cfg.DownloadTimeout
 	showVersion := false
 
 	flag.StringVar(&configPath, "config", configPath, "path to server config (yaml or json)")
@@ -37,6 +38,7 @@ func main() {
 	flag.StringVar(&token, "github-token", token, "GitHub token for higher rate limits (env: GITHUB_TOKEN)")
 	flag.StringVar(&defaultUser, "default-user", defaultUser, "default user grouping when client user is empty")
 	flag.BoolVar(&showVersion, "version", showVersion, "print version and exit")
+	flag.StringVar(&downloadTO, "download-timeout", downloadTO, "timeout for download/package handlers (e.g., 10m, 5m)")
 	flag.Parse()
 
 	if showVersion {
@@ -44,7 +46,12 @@ func main() {
 		return
 	}
 
-	s, err := srv.NewServer(root, defaultUser, token)
+	dlTimeout, err := time.ParseDuration(strings.TrimSpace(downloadTO))
+	if err != nil || dlTimeout <= 0 {
+		log.Fatalf("invalid download-timeout: %v", err)
+	}
+
+	s, err := srv.NewServer(root, defaultUser, token, dlTimeout)
 	if err != nil {
 		log.Fatalf("init server: %v", err)
 	}

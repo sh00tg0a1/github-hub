@@ -18,6 +18,8 @@ import (
 	"github-hub/internal/storage"
 )
 
+const defaultDownloadTimeout = 10 * time.Minute
+
 //go:embed static/*
 var uiFS embed.FS
 
@@ -35,6 +37,7 @@ type Server struct {
 	store       Store
 	token       string
 	defaultUser string
+	downloadTO  time.Duration
 
 	cleanupInterval time.Duration
 	ttl             time.Duration
@@ -43,16 +46,20 @@ type Server struct {
 	janitorCancel context.CancelFunc
 }
 
-func NewServer(root, defaultUser, githubToken string) (*Server, error) {
+func NewServer(root, defaultUser, githubToken string, downloadTimeout time.Duration) (*Server, error) {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return nil, err
 	}
 	st := storage.New(root)
 	ctx, cancel := context.WithCancel(context.Background())
+	if downloadTimeout <= 0 {
+		downloadTimeout = defaultDownloadTimeout
+	}
 	s := &Server{
 		store:           st,
 		token:           githubToken,
 		defaultUser:     defaultUser,
+		downloadTO:      downloadTimeout,
 		cleanupInterval: time.Minute,
 		ttl:             24 * time.Hour,
 		janitorCtx:      ctx,
@@ -69,6 +76,7 @@ func NewServerWithStore(store Store, githubToken, defaultUser string) *Server {
 		store:           store,
 		token:           githubToken,
 		defaultUser:     defaultUser,
+		downloadTO:      defaultDownloadTimeout,
 		cleanupInterval: time.Minute,
 		ttl:             24 * time.Hour,
 		janitorCtx:      ctx,
@@ -103,7 +111,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing repo", http.StatusBadRequest)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(r.Context(), s.downloadTO)
 	defer cancel()
 
 	// Ensure cached copy exists (download if missing), and then stream a zip.
@@ -152,7 +160,7 @@ func (s *Server) handleDownloadCommit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing repo", http.StatusBadRequest)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(r.Context(), s.downloadTO)
 	defer cancel()
 
 	zipPath, err := s.store.EnsureRepo(ctx, user, repo, branch, token)
@@ -182,7 +190,7 @@ func (s *Server) handleDownloadPackage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing url", http.StatusBadRequest)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(r.Context(), s.downloadTO)
 	defer cancel()
 
 	filePath, err := s.store.EnsurePackage(ctx, user, pkgURL)
@@ -194,7 +202,8 @@ func (s *Server) handleDownloadPackage(w http.ResponseWriter, r *http.Request) {
 	name := filepath.Base(filePath)
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", name))
-	_ = s.store.Touch(s.userPath(user, filepath.Join("packages", name)))
+	hashStr := storage.PackageHash(pkgURL)
+	_ = s.store.Touch(s.userPath(user, filepath.Join("packages", hashStr, name)))
 	f, err := os.Open(filePath)
 	if err != nil {
 		httpError(w, "open package", err)

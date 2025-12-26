@@ -21,7 +21,7 @@ func TestDirListAndDeleteHandlers(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s, err := NewServer(root, user, "")
+	s, err := NewServer(root, user, "", defaultDownloadTimeout)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,7 @@ func TestDirListAndDeleteHandlers(t *testing.T) {
 
 func TestStaticIndexServed(t *testing.T) {
 	root := t.TempDir()
-	s, err := NewServer(root, "default", "")
+	s, err := NewServer(root, "default", "", defaultDownloadTimeout)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestStaticIndexServed(t *testing.T) {
 
 func TestBadRelPathsAreRejected(t *testing.T) {
 	root := t.TempDir()
-	s, err := NewServer(root, "default", "")
+	s, err := NewServer(root, "default", "", defaultDownloadTimeout)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestBadRelPathsAreRejected(t *testing.T) {
 
 func TestShutdownStopsJanitor(t *testing.T) {
 	root := t.TempDir()
-	s, err := NewServer(root, "default", "")
+	s, err := NewServer(root, "default", "", defaultDownloadTimeout)
 	if err != nil {
 		t.Fatal(err)
 	}

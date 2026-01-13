@@ -13,15 +13,17 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Client is a minimal HTTP API client for the ghh server.
 type Client struct {
-	BaseURL  string
-	Token    string
-	User     string
-	http     *http.Client
-	Endpoint Endpoints
+	BaseURL    string
+	Token      string
+	User       string
+	DebugDelay string // DEBUG: request server to add artificial delay (e.g., "90s", "2m")
+	http       *http.Client
+	Endpoint   Endpoints
 }
 
 // NewClient creates a new API client.
@@ -84,12 +86,17 @@ func (c *Client) DownloadPackage(ctx context.Context, pkgURL, destPath string) e
 // extractDir: if non-empty, extract the zip to this directory after download
 // Expected server endpoint: GET /api/v1/download?repo=<>&branch=<>
 func (c *Client) Download(ctx context.Context, repo, branch, zipPath, extractDir string) error {
+	startTime := time.Now()
+
 	q := url.Values{}
 	if !strings.Contains(c.Endpoint.Download, "{repo}") {
 		q.Set("repo", repo)
 	}
 	if strings.TrimSpace(branch) != "" && !strings.Contains(c.Endpoint.Download, "{branch}") {
 		q.Set("branch", branch)
+	}
+	if strings.TrimSpace(c.DebugDelay) != "" {
+		q.Set("debug_delay", c.DebugDelay)
 	}
 	path := replacePlaceholders(c.Endpoint.Download, map[string]string{"repo": repo, "branch": branch, "path": ""})
 	endpoint := c.fullURL(path, q)
@@ -110,6 +117,7 @@ func (c *Client) Download(ctx context.Context, repo, branch, zipPath, extractDir
 		return &HTTPError{StatusCode: resp.StatusCode, Message: "download failed", Body: string(body)}
 	}
 	commit := strings.TrimSpace(resp.Header.Get("X-GHH-Commit"))
+	fmt.Printf("downloading %s ...\n", repo)
 
 	// Remove existing zip file if it exists
 	if err := os.RemoveAll(zipPath); err != nil {
@@ -120,7 +128,13 @@ func (c *Client) Download(ctx context.Context, repo, branch, zipPath, extractDir
 	if err := writeStreamToFile(zipPath, resp.Body); err != nil {
 		return err
 	}
-	fmt.Printf("saved archive to %s\n", zipPath)
+	elapsed := time.Since(startTime)
+	fi, _ := os.Stat(zipPath)
+	size := int64(0)
+	if fi != nil {
+		size = fi.Size()
+	}
+	fmt.Printf("saved archive to %s (%.2f MB, %s)\n", zipPath, float64(size)/(1024*1024), elapsed.Round(time.Millisecond))
 
 	// If extractDir is specified, extract the zip
 	if extractDir != "" {

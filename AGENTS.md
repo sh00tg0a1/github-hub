@@ -1,4 +1,4 @@
-# Repository Guidelines
+﻿# Repository Guidelines
 
 ## 项目结构与模块组织
 - Go 模块以 `go.mod` 为根；可执行程序放在 `cmd/ghh/`（入口 `main.go`）。

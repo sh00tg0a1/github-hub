@@ -22,7 +22,7 @@ func DefaultConfig() Config {
 		Addr:            ":8080",
 		Root:            "data",
 		DefaultUser:     "default",
-		DownloadTimeout: "10m",
+		DownloadTimeout: "30m",
 	}
 }
 

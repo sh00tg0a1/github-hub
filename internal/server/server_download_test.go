@@ -25,12 +25,14 @@ type fakeStore struct {
 	lastRepo   string
 	lastBranch string
 	lastPkgURL string
+	lastForce  bool
 }
 
-func (f *fakeStore) EnsureRepo(ctx context.Context, user, ownerRepo, branch, token string) (string, error) {
+func (f *fakeStore) EnsureRepo(ctx context.Context, user, ownerRepo, branch, token string, force bool) (string, error) {
 	f.lastUser = user
 	f.lastRepo = ownerRepo
 	f.lastBranch = branch
+	f.lastForce = force
 	return f.ensurePath, f.ensureErr
 }
 func (f *fakeStore) EnsurePackage(ctx context.Context, user, pkgURL string) (string, error) {
@@ -47,7 +49,9 @@ func TestDownloadHandler_UsesStore(t *testing.T) {
 	tmpDir := t.TempDir()
 	zipPath := filepath.Join(tmpDir, "repo.zip")
 	createZip(t, zipPath)
-	if err := os.WriteFile(zipPath+".commit.txt", []byte("abc123\n"), 0o644); err != nil {
+	// commit file should be repo.commit.txt, not repo.zip.commit.txt
+	commitPath := strings.TrimSuffix(zipPath, ".zip") + ".commit.txt"
+	if err := os.WriteFile(commitPath, []byte("abc123\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -91,11 +95,57 @@ func TestDownloadHandler_UsesStore(t *testing.T) {
 	}
 }
 
+func TestDownloadHandler_ForceRefresh(t *testing.T) {
+	tmpDir := t.TempDir()
+	zipPath := filepath.Join(tmpDir, "repo.zip")
+	createZip(t, zipPath)
+
+	fs := &fakeStore{ensurePath: zipPath}
+	s := NewServerWithStore(fs, "", "default")
+	mux := http.NewServeMux()
+	s.RegisterRoutes(mux)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	// Test without force
+	resp, err := http.Get(ts.URL + "/api/v1/download?repo=own/repo&branch=main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if fs.lastForce {
+		t.Fatalf("expected force=false, got true")
+	}
+
+	// Test with force=true
+	resp, err = http.Get(ts.URL + "/api/v1/download?repo=own/repo&branch=main&force=true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if !fs.lastForce {
+		t.Fatalf("expected force=true, got false")
+	}
+
+	// Test with force=1 (also valid)
+	fs.lastForce = false
+	resp, err = http.Get(ts.URL + "/api/v1/download?repo=own/repo&branch=main&force=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if !fs.lastForce {
+		t.Fatalf("expected force=true for force=1, got false")
+	}
+}
+
 func TestDownloadCommitHandler(t *testing.T) {
 	tmpDir := t.TempDir()
 	zipPath := filepath.Join(tmpDir, "repo.zip")
 	createZip(t, zipPath)
-	if err := os.WriteFile(zipPath+".commit.txt", []byte("deadbeef\n"), 0o644); err != nil {
+	// commit file should be repo.commit.txt, not repo.zip.commit.txt
+	commitPath := strings.TrimSuffix(zipPath, ".zip") + ".commit.txt"
+	if err := os.WriteFile(commitPath, []byte("deadbeef\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 

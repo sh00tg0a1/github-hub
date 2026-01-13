@@ -105,22 +105,38 @@ func TestBadRelPathsAreRejected(t *testing.T) {
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	tests := []string{
+	// Test GET endpoint /api/v1/dir/list
+	listTests := []string{
 		"/api/v1/dir/list?path=..",
 		"/api/v1/dir/list?path=../foo",
 		"/api/v1/dir/list?path=/absolute",
 		"/api/v1/dir/list?path=./dot",
 		"/api/v1/dir/list?path=foo/../bar",
+	}
+	for _, u := range listTests {
+		resp, err := http.Get(ts.URL + u)
+		if err != nil {
+			t.Fatalf("get %s: %v", u, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("path %s expected 400, got %d", u, resp.StatusCode)
+		}
+	}
+
+	// Test DELETE endpoint /api/v1/dir
+	dirTests := []string{
 		"/api/v1/dir?path=..",
 		"/api/v1/dir?path=../foo",
 		"/api/v1/dir?path=/absolute",
 		"/api/v1/dir?path=./dot",
 		"/api/v1/dir?path=foo/../bar",
 	}
-	for _, u := range tests {
-		resp, err := http.Get(ts.URL + u)
+	for _, u := range dirTests {
+		req, _ := http.NewRequest(http.MethodDelete, ts.URL+u, nil)
+		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
-			t.Fatalf("get %s: %v", u, err)
+			t.Fatalf("delete %s: %v", u, err)
 		}
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusBadRequest {

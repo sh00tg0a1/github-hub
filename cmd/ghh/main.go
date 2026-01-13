@@ -89,11 +89,14 @@ func main() {
 	}
 
 	// Build HTTP client
-	transport := &http.Transport{}
+	transport := &http.Transport{
+		DisableKeepAlives: true, // Disable keep-alive to avoid hanging on exit
+	}
 	if insecure {
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} // #nosec G402 optional
 	}
 	httpClient := &http.Client{Timeout: timeout, Transport: transport}
+	defer transport.CloseIdleConnections()
 	client := ic.NewClient(server, token, httpClient)
 	client.Endpoint = eps
 	client.User = strings.TrimSpace(user)
@@ -109,8 +112,12 @@ func main() {
 		branch := cmd.String("branch", "", "branch name (default: server default)")
 		dest := cmd.String("dest", "", "destination path (default: current directory)")
 		extract := cmd.Bool("extract", false, "extract zip archive into dest directory")
+		debugDelay := cmd.String("debug-delay", "", "DEBUG: request server to add artificial delay (e.g., 90s, 2m)")
 		if err := cmd.Parse(args[1:]); err != nil {
 			exitErr(err)
+		}
+		if *debugDelay != "" {
+			client.DebugDelay = *debugDelay
 		}
 		pkgURL := strings.TrimSpace(*pkgURLFlag)
 		if pkgURL != "" {
@@ -229,6 +236,14 @@ Global Flags:
   --insecure   Skip TLS verification
   --version    Print version and exit
 
+Download Flags:
+  --repo         Repository identifier (e.g. owner/name)
+  --branch       Branch name (default: server default)
+  --dest         Destination path (default: current directory)
+  --extract      Extract zip archive into dest directory
+  --package      Package download URL (alternative to --repo)
+  --debug-delay  DEBUG: request server to add artificial delay (e.g., 90s, 2m)
+
 Examples:
   ghh --server http://localhost:8080 download --repo foo/bar --branch main
   ghh --server http://localhost:8080 download --repo foo/bar --dest out.zip
@@ -237,6 +252,7 @@ Examples:
   ghh --server http://localhost:8080 switch --repo foo/bar --branch dev
   ghh --server http://localhost:8080 ls --path repos/foo/bar
   ghh --server http://localhost:8080 rm --path repos/foo/bar --r
+  ghh --timeout 3m download --repo foo/bar --debug-delay 90s
 `)
 }
 

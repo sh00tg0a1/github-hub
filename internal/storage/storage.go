@@ -23,7 +23,9 @@ var (
 )
 
 type Storage struct {
-	Root string
+	Root            string
+	HTTPClient      *http.Client
+	DebugSlowReader time.Duration // DEBUG: delay per read chunk to simulate slow network
 
 	mu   sync.Mutex
 	lock map[string]*sync.Mutex
@@ -105,7 +107,27 @@ func (s *Storage) EnsurePackage(ctx context.Context, user, pkgURL string) (strin
 	return pkgPath, nil
 }
 
-func New(root string) *Storage { return &Storage{Root: root} }
+// New creates a Storage with a default HTTP client (no timeout, relies on context).
+func New(root string) *Storage {
+	return NewWithTimeout(root, 0)
+}
+
+// NewWithTimeout creates a Storage with an HTTP client configured with the given timeout.
+// If timeout <= 0, no client-level timeout is set (relies on context timeout).
+func NewWithTimeout(root string, timeout time.Duration) *Storage {
+	client := &http.Client{}
+	if timeout > 0 {
+		client.Timeout = timeout
+	}
+	return &Storage{Root: root, HTTPClient: client}
+}
+
+func (s *Storage) httpClient() *http.Client {
+	if s.HTTPClient != nil {
+		return s.HTTPClient
+	}
+	return http.DefaultClient
+}
 
 // EnsureRepo ensures a cached repo (owner/repo) at branch exists under workspace.
 // If missing, it downloads from GitHub zipball and extracts into
@@ -113,7 +135,8 @@ func New(root string) *Storage { return &Storage{Root: root} }
 //	<root>/users/<user>/repos/<owner>/<repo>/<branch>.zip
 //
 // If branch is empty, fetches the default branch from GitHub API.
-func (s *Storage) EnsureRepo(ctx context.Context, user, ownerRepo, branch, token string) (string, error) {
+// If force is true, bypasses cache validation and always downloads fresh.
+func (s *Storage) EnsureRepo(ctx context.Context, user, ownerRepo, branch, token string, force bool) (string, error) {
 	user = strings.Trim(user, "/ ")
 	if user == "" {
 		user = "default"
@@ -147,15 +170,17 @@ func (s *Storage) EnsureRepo(ctx context.Context, user, ownerRepo, branch, token
 		return "", err
 	}
 
-	// If we have cache and sha matches (or fetch failed but no cache), reuse.
-	if info, err := os.Stat(zipPath); err == nil && !info.IsDir() {
-		if remoteSHA != "" {
-			if cachedSHA, err := readSHA(metaPath); err == nil && cachedSHA == remoteSHA {
-				_ = s.touch(zipPath)
-				return zipPath, nil
+	// If we have cache and sha matches, reuse (unless force refresh requested).
+	if !force {
+		if info, err := os.Stat(zipPath); err == nil && !info.IsDir() {
+			if remoteSHA != "" {
+				if cachedSHA, err := readSHA(metaPath); err == nil && cachedSHA == remoteSHA {
+					_ = s.touch(zipPath)
+					return zipPath, nil
+				}
+			} else if fetchErr != nil {
+				// Cannot verify, force refresh
 			}
-		} else if fetchErr != nil {
-			// Cannot verify, force refresh
 		}
 	}
 
@@ -282,7 +307,7 @@ func (s *Storage) downloadZip(ctx context.Context, ownerRepo, branch, token, des
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	req.Header.Set("Accept", "application/zip")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := s.httpClient().Do(req)
 	if err != nil {
 		return err
 	}
@@ -296,7 +321,16 @@ func (s *Storage) downloadZip(ctx context.Context, ownerRepo, branch, token, des
 		return err
 	}
 	defer out.Close()
-	if _, err := io.Copy(out, resp.Body); err != nil {
+
+	// DEBUG: wrap reader to simulate slow network with target total duration
+	var reader io.Reader = resp.Body
+	if s.DebugSlowReader > 0 {
+		fmt.Printf("DEBUG: simulating slow network, target download time %s for repo=%s (size=%d bytes)\n",
+			s.DebugSlowReader, ownerRepo, resp.ContentLength)
+		reader = newSlowReader(resp.Body, ctx, s.DebugSlowReader, resp.ContentLength)
+	}
+
+	if _, err := io.Copy(out, reader); err != nil {
 		return err
 	}
 	return nil
@@ -307,7 +341,7 @@ func (s *Storage) downloadFile(ctx context.Context, fileURL, dest string) error 
 	if err != nil {
 		return err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := s.httpClient().Do(req)
 	if err != nil {
 		return err
 	}
@@ -439,7 +473,7 @@ func (s *Storage) fetchDefaultBranch(ctx context.Context, ownerRepo, token strin
 	if strings.TrimSpace(token) != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := s.httpClient().Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -477,7 +511,7 @@ func (s *Storage) fetchBranchSHA(ctx context.Context, ownerRepo, branch, token s
 	if strings.TrimSpace(token) != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := s.httpClient().Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -517,4 +551,74 @@ type Entry struct {
 	Path  string `json:"path"`
 	IsDir bool   `json:"is_dir"`
 	Size  int64  `json:"size"`
+}
+
+// slowReader wraps an io.Reader to simulate slow network by stretching download to target duration.
+type slowReader struct {
+	r             io.Reader
+	ctx           context.Context
+	totalDuration time.Duration // target total download time
+	contentLength int64         // expected total bytes (-1 if unknown)
+	startTime     time.Time
+	bytesRead     int64
+	readCount     int
+}
+
+func newSlowReader(r io.Reader, ctx context.Context, totalDuration time.Duration, contentLength int64) *slowReader {
+	return &slowReader{
+		r:             r,
+		ctx:           ctx,
+		totalDuration: totalDuration,
+		contentLength: contentLength,
+		startTime:     time.Now(),
+	}
+}
+
+func (sr *slowReader) Read(p []byte) (n int, err error) {
+	// Check context before reading
+	select {
+	case <-sr.ctx.Done():
+		return 0, sr.ctx.Err()
+	default:
+	}
+
+	n, err = sr.r.Read(p)
+	if n > 0 {
+		sr.bytesRead += int64(n)
+		sr.readCount++
+	}
+	if err != nil {
+		return n, err
+	}
+
+	if sr.totalDuration > 0 && n > 0 {
+		var sleepTime time.Duration
+
+		if sr.contentLength > 0 {
+			// Content-Length known: calculate based on progress
+			progress := float64(sr.bytesRead) / float64(sr.contentLength)
+			expectedElapsed := time.Duration(float64(sr.totalDuration) * progress)
+			actualElapsed := time.Since(sr.startTime)
+			if expectedElapsed > actualElapsed {
+				sleepTime = expectedElapsed - actualElapsed
+			}
+		} else {
+			// Content-Length unknown: use fixed delay per chunk
+			// Assume ~2000 reads for a typical repo (~70MB), spread totalDuration across reads
+			delayPerRead := sr.totalDuration / 2000
+			if delayPerRead < time.Millisecond {
+				delayPerRead = time.Millisecond
+			}
+			sleepTime = delayPerRead
+		}
+
+		if sleepTime > 0 {
+			select {
+			case <-time.After(sleepTime):
+			case <-sr.ctx.Done():
+				return n, sr.ctx.Err()
+			}
+		}
+	}
+	return n, err
 }

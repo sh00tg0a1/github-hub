@@ -18,14 +18,14 @@ import (
 	"github-hub/internal/storage"
 )
 
-const defaultDownloadTimeout = 10 * time.Minute
+const defaultDownloadTimeout = 30 * time.Minute
 
 //go:embed static/*
 var uiFS embed.FS
 
 // Store is the abstraction for workspace/cache storage used by the server.
 type Store interface {
-	EnsureRepo(ctx context.Context, user, ownerRepo, branch, token string) (string, error)
+	EnsureRepo(ctx context.Context, user, ownerRepo, branch, token string, force bool) (string, error)
 	EnsurePackage(ctx context.Context, user, pkgURL string) (string, error)
 	List(rel string) ([]storage.Entry, error)
 	Delete(rel string, recursive bool) error
@@ -50,11 +50,12 @@ func NewServer(root, defaultUser, githubToken string, downloadTimeout time.Durat
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return nil, err
 	}
-	st := storage.New(root)
-	ctx, cancel := context.WithCancel(context.Background())
 	if downloadTimeout <= 0 {
 		downloadTimeout = defaultDownloadTimeout
 	}
+	// Pass download timeout to storage HTTP client
+	st := storage.NewWithTimeout(root, downloadTimeout)
+	ctx, cancel := context.WithCancel(context.Background())
 	s := &Server{
 		store:           st,
 		token:           githubToken,
@@ -107,6 +108,8 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	token := tokenFromRequest(r, s.token)
 	repo := strings.TrimSpace(r.URL.Query().Get("repo"))
 	branch := strings.TrimSpace(r.URL.Query().Get("branch"))
+	force, _ := strconv.ParseBool(r.URL.Query().Get("force"))
+	debugDelayStr := strings.TrimSpace(r.URL.Query().Get("debug_delay"))
 	if repo == "" {
 		http.Error(w, "missing repo", http.StatusBadRequest)
 		return
@@ -114,9 +117,23 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), s.downloadTO)
 	defer cancel()
 
+	// DEBUG: simulate slow network by adding delay per read chunk during download
+	if debugDelayStr != "" {
+		debugDelay, err := time.ParseDuration(debugDelayStr)
+		if err == nil && debugDelay > 0 {
+			fmt.Printf("DEBUG: client requested slow network simulation (%s per chunk) for repo=%s\n", debugDelay, repo)
+			if st, ok := s.store.(*storage.Storage); ok {
+				st.DebugSlowReader = debugDelay
+				defer func() { st.DebugSlowReader = 0 }() // cleanup after request
+			}
+			force = true // ensure we actually download from GitHub (bypass cache)
+		}
+	}
+
 	// Ensure cached copy exists (download if missing), and then stream a zip.
 	// If branch is empty, EnsureRepo will fetch the default branch from GitHub.
-	zipPath, err := s.store.EnsureRepo(ctx, user, repo, branch, token)
+	// If force is true, bypass cache validation and always download fresh.
+	zipPath, err := s.store.EnsureRepo(ctx, user, repo, branch, token, force)
 	if err != nil {
 		fmt.Printf("download error user=%s repo=%s branch=%s err=%v\n", user, repo, branch, err)
 		httpError(w, "ensure repo", err)
@@ -156,6 +173,7 @@ func (s *Server) handleDownloadCommit(w http.ResponseWriter, r *http.Request) {
 	token := tokenFromRequest(r, s.token)
 	repo := strings.TrimSpace(r.URL.Query().Get("repo"))
 	branch := strings.TrimSpace(r.URL.Query().Get("branch"))
+	force, _ := strconv.ParseBool(r.URL.Query().Get("force"))
 	if repo == "" {
 		http.Error(w, "missing repo", http.StatusBadRequest)
 		return
@@ -163,7 +181,7 @@ func (s *Server) handleDownloadCommit(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), s.downloadTO)
 	defer cancel()
 
-	zipPath, err := s.store.EnsureRepo(ctx, user, repo, branch, token)
+	zipPath, err := s.store.EnsureRepo(ctx, user, repo, branch, token, force)
 	if err != nil {
 		fmt.Printf("download commit error user=%s repo=%s branch=%s err=%v\n", user, repo, branch, err)
 		httpError(w, "ensure repo", err)
@@ -227,6 +245,7 @@ func (s *Server) handleBranchSwitch(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Repo   string `json:"repo"`
 		Branch string `json:"branch"`
+		Force  bool   `json:"force"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
@@ -238,7 +257,7 @@ func (s *Server) handleBranchSwitch(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 	defer cancel()
-	if _, err := s.store.EnsureRepo(ctx, user, req.Repo, req.Branch, token); err != nil {
+	if _, err := s.store.EnsureRepo(ctx, user, req.Repo, req.Branch, token, req.Force); err != nil {
 		fmt.Printf("branch switch error user=%s repo=%s branch=%s err=%v\n", user, req.Repo, req.Branch, err)
 		httpError(w, "ensure branch", err)
 		return
@@ -372,6 +391,14 @@ func sanitizeUser(u string) string {
 }
 
 func badRel(rel string) bool {
+	// Check for suspicious patterns before filepath.Clean normalizes them away
+	// (e.g., filepath.Clean("./dot") -> "dot", filepath.Clean("foo/../bar") -> "bar")
+	if strings.HasPrefix(rel, "./") || strings.HasPrefix(rel, ".\\") {
+		return true
+	}
+	if strings.Contains(rel, "..") {
+		return true
+	}
 	rel = filepath.ToSlash(filepath.Clean(rel))
 	if rel == "" || rel == "." || rel == "/" {
 		return false
@@ -381,9 +408,6 @@ func badRel(rel string) bool {
 		return true
 	}
 	if strings.HasPrefix(rel, ".") {
-		return true
-	}
-	if strings.HasPrefix(rel, "..") || strings.Contains(rel, "/..") {
 		return true
 	}
 	if strings.Contains(rel, "/.") {

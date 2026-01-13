@@ -59,13 +59,13 @@ func main() {
 	mux := http.NewServeMux()
 	s.RegisterRoutes(mux)
 
-	srv := &http.Server{
+	httpSrv := &http.Server{
 		Addr:              addr,
 		Handler:           logging(mux),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	fmt.Printf("ghh-server listening on %s, root=%s, default_user=%s\n", addr, root, defaultUser)
-	log.Fatal(srv.ListenAndServe())
+	log.Fatal(httpSrv.ListenAndServe())
 }
 
 type statusRecorder struct {

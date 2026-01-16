@@ -110,6 +110,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	branch := strings.TrimSpace(r.URL.Query().Get("branch"))
 	force, _ := strconv.ParseBool(r.URL.Query().Get("force"))
 	debugDelayStr := strings.TrimSpace(r.URL.Query().Get("debug_delay"))
+	debugStreamDelayStr := strings.TrimSpace(r.URL.Query().Get("debug_stream_delay"))
 	if repo == "" {
 		http.Error(w, "missing repo", http.StatusBadRequest)
 		return
@@ -127,6 +128,13 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 				defer func() { st.DebugSlowReader = 0 }() // cleanup after request
 			}
 			force = true // ensure we actually download from GitHub (bypass cache)
+		}
+	}
+	var streamDelay time.Duration
+	if debugStreamDelayStr != "" {
+		if d, err := time.ParseDuration(debugStreamDelayStr); err == nil && d > 0 {
+			streamDelay = d
+			fmt.Printf("DEBUG: client requested slow stream (%s) for repo=%s\n", d, repo)
 		}
 	}
 
@@ -157,7 +165,16 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer f.Close()
-	if _, err := io.Copy(w, f); err != nil {
+	var reader io.Reader = f
+	if fi, err := f.Stat(); err == nil {
+		w.Header().Set("Content-Length", strconv.FormatInt(fi.Size(), 10))
+		if streamDelay > 0 {
+			reader = newSlowReader(f, r.Context(), streamDelay, fi.Size())
+		}
+	} else if streamDelay > 0 {
+		reader = newSlowReader(f, r.Context(), streamDelay, -1)
+	}
+	if _, err := io.Copy(w, reader); err != nil {
 		fmt.Printf("zip stream error user=%s repo=%s branch=%s err=%v\n", user, repo, actualBranch, err)
 		return
 	}
@@ -204,12 +221,20 @@ func (s *Server) handleDownloadPackage(w http.ResponseWriter, r *http.Request) {
 	}
 	user := s.resolveUser(r)
 	pkgURL := strings.TrimSpace(r.URL.Query().Get("url"))
+	debugStreamDelayStr := strings.TrimSpace(r.URL.Query().Get("debug_stream_delay"))
 	if pkgURL == "" {
 		http.Error(w, "missing url", http.StatusBadRequest)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), s.downloadTO)
 	defer cancel()
+	var streamDelay time.Duration
+	if debugStreamDelayStr != "" {
+		if d, err := time.ParseDuration(debugStreamDelayStr); err == nil && d > 0 {
+			streamDelay = d
+			fmt.Printf("DEBUG: client requested slow stream (%s) for url=%s\n", d, pkgURL)
+		}
+	}
 
 	filePath, err := s.store.EnsurePackage(ctx, user, pkgURL)
 	if err != nil {
@@ -228,7 +253,16 @@ func (s *Server) handleDownloadPackage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer f.Close()
-	if _, err := io.Copy(w, f); err != nil {
+	var reader io.Reader = f
+	if fi, err := f.Stat(); err == nil {
+		w.Header().Set("Content-Length", strconv.FormatInt(fi.Size(), 10))
+		if streamDelay > 0 {
+			reader = newSlowReader(f, r.Context(), streamDelay, fi.Size())
+		}
+	} else if streamDelay > 0 {
+		reader = newSlowReader(f, r.Context(), streamDelay, -1)
+	}
+	if _, err := io.Copy(w, reader); err != nil {
 		fmt.Printf("package stream error user=%s url=%s err=%v\n", user, pkgURL, err)
 		return
 	}
@@ -434,6 +468,76 @@ func tokenFromRequest(r *http.Request, fallback string) string {
 		}
 	}
 	return fallback
+}
+
+// slowReader wraps an io.Reader to simulate slow network by stretching download to target duration.
+type slowReader struct {
+	r             io.Reader
+	ctx           context.Context
+	totalDuration time.Duration // target total download time
+	contentLength int64         // expected total bytes (-1 if unknown)
+	startTime     time.Time
+	bytesRead     int64
+	readCount     int
+}
+
+func newSlowReader(r io.Reader, ctx context.Context, totalDuration time.Duration, contentLength int64) *slowReader {
+	return &slowReader{
+		r:             r,
+		ctx:           ctx,
+		totalDuration: totalDuration,
+		contentLength: contentLength,
+		startTime:     time.Now(),
+	}
+}
+
+func (sr *slowReader) Read(p []byte) (n int, err error) {
+	// Check context before reading
+	select {
+	case <-sr.ctx.Done():
+		return 0, sr.ctx.Err()
+	default:
+	}
+
+	n, err = sr.r.Read(p)
+	if n > 0 {
+		sr.bytesRead += int64(n)
+		sr.readCount++
+	}
+	if err != nil {
+		return n, err
+	}
+
+	if sr.totalDuration > 0 && n > 0 {
+		var sleepTime time.Duration
+
+		if sr.contentLength > 0 {
+			// Content-Length known: calculate based on progress
+			progress := float64(sr.bytesRead) / float64(sr.contentLength)
+			expectedElapsed := time.Duration(float64(sr.totalDuration) * progress)
+			actualElapsed := time.Since(sr.startTime)
+			if expectedElapsed > actualElapsed {
+				sleepTime = expectedElapsed - actualElapsed
+			}
+		} else {
+			// Content-Length unknown: use fixed delay per chunk
+			// Assume ~2000 reads for a typical repo (~70MB), spread totalDuration across reads
+			delayPerRead := sr.totalDuration / 2000
+			if delayPerRead < time.Millisecond {
+				delayPerRead = time.Millisecond
+			}
+			sleepTime = delayPerRead
+		}
+
+		if sleepTime > 0 {
+			select {
+			case <-time.After(sleepTime):
+			case <-sr.ctx.Done():
+				return n, sr.ctx.Err()
+			}
+		}
+	}
+	return n, err
 }
 
 func (s *Server) startJanitor() {

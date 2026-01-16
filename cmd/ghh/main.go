@@ -6,9 +6,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,7 +19,11 @@ import (
 	"github-hub/internal/version"
 )
 
-const defaultTimeout = 30 * time.Second
+const (
+	defaultTimeout      = 30 * time.Second
+	defaultRetryMax     = 5
+	defaultRetryBackoff = 2 * time.Second
+)
 
 func main() {
 	if len(os.Args) < 2 {
@@ -29,10 +35,23 @@ func main() {
 	server := getenvDefault("GHH_BASE_URL", "")
 	token := os.Getenv("GHH_TOKEN")
 	timeout := defaultTimeout
+	retryMax := defaultRetryMax
+	retryBackoff := defaultRetryBackoff
 	insecure := false
 	configPath := os.Getenv("GHH_CONFIG")
 	user := strings.TrimSpace(os.Getenv("GHH_USER"))
 	showVersion := false
+
+	if v := strings.TrimSpace(os.Getenv("GHH_RETRY")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			retryMax = n
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("GHH_RETRY_BACKOFF")); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			retryBackoff = d
+		}
+	}
 
 	global := flag.NewFlagSet("ghh", flag.ContinueOnError)
 	global.Usage = func() { printUsage() }
@@ -40,6 +59,8 @@ func main() {
 	global.StringVar(&token, "token", token, "auth token (env: GHH_TOKEN)")
 	global.StringVar(&user, "user", user, "user name (env: GHH_USER or config.user)")
 	global.DurationVar(&timeout, "timeout", timeout, "HTTP timeout")
+	global.IntVar(&retryMax, "retry", retryMax, "retry times for failed downloads (env: GHH_RETRY)")
+	global.DurationVar(&retryBackoff, "retry-backoff", retryBackoff, "wait before retrying a failed download (env: GHH_RETRY_BACKOFF)")
 	global.BoolVar(&insecure, "insecure", insecure, "skip TLS verification")
 	global.StringVar(&configPath, "config", configPath, "path to YAML config (env: GHH_CONFIG); JSON compatible")
 	global.BoolVar(&showVersion, "version", showVersion, "print version and exit")
@@ -89,8 +110,18 @@ func main() {
 	}
 
 	// Build HTTP client
+	dialer := &net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
 	transport := &http.Transport{
-		DisableKeepAlives: true, // Disable keep-alive to avoid hanging on exit
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           dialer.DialContext,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   10,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
 	}
 	if insecure {
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} // #nosec G402 optional
@@ -100,6 +131,9 @@ func main() {
 	client := ic.NewClient(server, token, httpClient)
 	client.Endpoint = eps
 	client.User = strings.TrimSpace(user)
+	client.RetryMax = retryMax
+	client.RetryBackoff = retryBackoff
+	client.ProgressInterval = time.Second
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -113,11 +147,15 @@ func main() {
 		dest := cmd.String("dest", "", "destination path (default: current directory)")
 		extract := cmd.Bool("extract", false, "extract zip archive into dest directory")
 		debugDelay := cmd.String("debug-delay", "", "DEBUG: request server to add artificial delay (e.g., 90s, 2m)")
+		debugStreamDelay := cmd.String("debug-stream-delay", "", "DEBUG: slow down server streaming to client (e.g., 90s, 2m)")
 		if err := cmd.Parse(args[1:]); err != nil {
 			exitErr(err)
 		}
 		if *debugDelay != "" {
 			client.DebugDelay = *debugDelay
+		}
+		if *debugStreamDelay != "" {
+			client.DebugStreamDelay = *debugStreamDelay
 		}
 		pkgURL := strings.TrimSpace(*pkgURLFlag)
 		if pkgURL != "" {
@@ -233,6 +271,8 @@ Global Flags:
   --user       User name for grouping cache (env: GHH_USER)
   --config     Path to YAML config (env: GHH_CONFIG); JSON compatible
   --timeout    HTTP timeout (default: 30s)
+  --retry      Retry times for failed downloads (env: GHH_RETRY)
+  --retry-backoff  Wait before retrying a failed download (env: GHH_RETRY_BACKOFF)
   --insecure   Skip TLS verification
   --version    Print version and exit
 
@@ -243,6 +283,7 @@ Download Flags:
   --extract      Extract zip archive into dest directory
   --package      Package download URL (alternative to --repo)
   --debug-delay  DEBUG: request server to add artificial delay (e.g., 90s, 2m)
+  --debug-stream-delay  DEBUG: slow down server streaming to client (e.g., 90s, 2m)
 
 Examples:
   ghh --server http://localhost:8080 download --repo foo/bar --branch main

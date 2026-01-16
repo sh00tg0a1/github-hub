@@ -8,12 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -26,6 +28,8 @@ type Storage struct {
 	Root            string
 	HTTPClient      *http.Client
 	DebugSlowReader time.Duration // DEBUG: delay per read chunk to simulate slow network
+	RetryMax        int
+	RetryBackoff    time.Duration
 
 	mu   sync.Mutex
 	lock map[string]*sync.Mutex
@@ -115,11 +119,27 @@ func New(root string) *Storage {
 // NewWithTimeout creates a Storage with an HTTP client configured with the given timeout.
 // If timeout <= 0, no client-level timeout is set (relies on context timeout).
 func NewWithTimeout(root string, timeout time.Duration) *Storage {
-	client := &http.Client{}
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+	client := &http.Client{Transport: transport}
 	if timeout > 0 {
 		client.Timeout = timeout
 	}
-	return &Storage{Root: root, HTTPClient: client}
+	return &Storage{
+		Root:         root,
+		HTTPClient:   client,
+		RetryMax:     5,
+		RetryBackoff: 2 * time.Second,
+	}
 }
 
 func (s *Storage) httpClient() *http.Client {
@@ -298,67 +318,248 @@ func (s *Storage) acquire(user, repo, branch string) func() {
 
 // downloadZip downloads archive into the given path.
 func (s *Storage) downloadZip(ctx context.Context, ownerRepo, branch, token, dest string) error {
-	url := fmt.Sprintf("https://codeload.github.com/%s/zip/%s", ownerRepo, url.PathEscape(branch))
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return err
+	downloadURL := fmt.Sprintf("https://codeload.github.com/%s/zip/%s", ownerRepo, url.PathEscape(branch))
+	reqBuilder := func(ctx context.Context) (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(token) != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		req.Header.Set("Accept", "application/zip")
+		return req, nil
 	}
-	if strings.TrimSpace(token) != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
+	readerFn := func(resp *http.Response) io.Reader {
+		if s.DebugSlowReader > 0 {
+			fmt.Printf("DEBUG: simulating slow network, target download time %s for repo=%s (size=%d bytes)\n",
+				s.DebugSlowReader, ownerRepo, resp.ContentLength)
+			return newSlowReader(resp.Body, ctx, s.DebugSlowReader, resp.ContentLength)
+		}
+		return resp.Body
 	}
-	req.Header.Set("Accept", "application/zip")
-	resp, err := s.httpClient().Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return fmt.Errorf("download archive failed: %s", string(b))
-	}
-	out, err := os.Create(dest)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-
-	// DEBUG: wrap reader to simulate slow network with target total duration
-	var reader io.Reader = resp.Body
-	if s.DebugSlowReader > 0 {
-		fmt.Printf("DEBUG: simulating slow network, target download time %s for repo=%s (size=%d bytes)\n",
-			s.DebugSlowReader, ownerRepo, resp.ContentLength)
-		reader = newSlowReader(resp.Body, ctx, s.DebugSlowReader, resp.ContentLength)
-	}
-
-	if _, err := io.Copy(out, reader); err != nil {
-		return err
-	}
-	return nil
+	label := fmt.Sprintf("repo %s@%s", ownerRepo, branch)
+	return s.downloadWithRetry(ctx, dest, label, reqBuilder, readerFn)
 }
 
 func (s *Storage) downloadFile(ctx context.Context, fileURL, dest string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fileURL, nil)
-	if err != nil {
-		return err
+	reqBuilder := func(ctx context.Context) (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, fileURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		return req, nil
 	}
-	resp, err := s.httpClient().Do(req)
-	if err != nil {
-		return err
+	label := fmt.Sprintf("package %s", filepath.Base(fileURL))
+	return s.downloadWithRetry(ctx, dest, label, reqBuilder, func(resp *http.Response) io.Reader {
+		return resp.Body
+	})
+}
+
+func (s *Storage) downloadWithRetry(ctx context.Context, dest string, label string, reqBuilder func(context.Context) (*http.Request, error), readerFn func(*http.Response) io.Reader) error {
+	attempts := s.retryAttempts()
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		if attempt > 0 {
+			if err := sleepWithBackoff(ctx, s.retryBackoff(), attempt); err != nil {
+				return err
+			}
+		}
+		req, err := reqBuilder(ctx)
+		if err != nil {
+			return err
+		}
+		resp, err := s.httpClient().Do(req)
+		if err != nil {
+			lastErr = err
+			if attempt == attempts-1 || !isRetryableError(err) {
+				return err
+			}
+			continue
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+			resp.Body.Close()
+			err := fmt.Errorf("download failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
+			lastErr = err
+			if attempt == attempts-1 || !isRetryableStatus(resp.StatusCode) {
+				return err
+			}
+			continue
+		}
+
+		tmpFile, err := os.CreateTemp(filepath.Dir(dest), ".tmp-download-*")
+		if err != nil {
+			resp.Body.Close()
+			return err
+		}
+		tmpPath := tmpFile.Name()
+		tmpFile.Close()
+
+		reader := readerFn(resp)
+		out, err := os.Create(tmpPath)
+		if err != nil {
+			resp.Body.Close()
+			_ = os.Remove(tmpPath)
+			return err
+		}
+		var written int64
+		start := time.Now()
+		done := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func(total int64) {
+			defer wg.Done()
+			ticker := time.NewTicker(time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					printServerProgress(label, atomic.LoadInt64(&written), total, start, false)
+				case <-done:
+					printServerProgress(label, atomic.LoadInt64(&written), total, start, true)
+					return
+				}
+			}
+		}(resp.ContentLength)
+
+		cr := &countingReader{r: reader, ctx: ctx, written: &written}
+		_, err = io.Copy(out, cr)
+		out.Close()
+		resp.Body.Close()
+		close(done)
+		wg.Wait()
+		if err != nil {
+			_ = os.Remove(tmpPath)
+			lastErr = err
+			if attempt == attempts-1 || !isRetryableError(err) {
+				return err
+			}
+			continue
+		}
+		_ = os.Remove(dest)
+		if err := os.Rename(tmpPath, dest); err != nil {
+			_ = os.Remove(tmpPath)
+			return err
+		}
+		return nil
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return fmt.Errorf("download failed: %s", string(b))
+	return lastErr
+}
+
+func (s *Storage) retryAttempts() int {
+	if s.RetryMax < 0 {
+		return 1
 	}
-	out, err := os.Create(dest)
-	if err != nil {
-		return err
+	return s.RetryMax + 1
+}
+
+func (s *Storage) retryBackoff() time.Duration {
+	if s.RetryBackoff <= 0 {
+		return 2 * time.Second
 	}
-	defer out.Close()
-	if _, err := io.Copy(out, resp.Body); err != nil {
-		return err
+	return s.RetryBackoff
+}
+
+func sleepWithBackoff(ctx context.Context, base time.Duration, attempt int) error {
+	backoff := base * time.Duration(attempt)
+	if backoff <= 0 {
+		return nil
 	}
-	return nil
+	timer := time.NewTimer(backoff)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func isRetryableStatus(status int) bool {
+	return status == http.StatusRequestTimeout ||
+		status == http.StatusTooManyRequests ||
+		status >= 500
+}
+
+func isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var nerr net.Error
+	if errors.As(err, &nerr) {
+		if nerr.Timeout() || nerr.Temporary() {
+			return true
+		}
+	}
+	return true
+}
+
+type countingReader struct {
+	r       io.Reader
+	ctx     context.Context
+	written *int64
+}
+
+func (cr *countingReader) Read(p []byte) (int, error) {
+	if cr.ctx != nil {
+		select {
+		case <-cr.ctx.Done():
+			return 0, cr.ctx.Err()
+		default:
+		}
+	}
+	n, err := cr.r.Read(p)
+	if n > 0 {
+		atomic.AddInt64(cr.written, int64(n))
+	}
+	return n, err
+}
+
+func printServerProgress(label string, written, total int64, start time.Time, final bool) {
+	if label == "" {
+		label = "download"
+	}
+	elapsed := time.Since(start)
+	if elapsed <= 0 {
+		elapsed = time.Millisecond
+	}
+	speed := float64(written) / elapsed.Seconds()
+	if total > 0 {
+		percent := float64(written) / float64(total) * 100
+		if percent > 100 {
+			percent = 100
+		}
+		fmt.Printf("github download %s: %s/%s (%.1f%%) %s/s\n",
+			label, formatBytes(written), formatBytes(total), percent, formatBytes(int64(speed)))
+	} else {
+		fmt.Printf("github download %s: %s %s/s\n",
+			label, formatBytes(written), formatBytes(int64(speed)))
+	}
+	if final {
+		fmt.Printf("github download %s: done\n", label)
+	}
+}
+
+func formatBytes(n int64) string {
+	const unit = 1024.0
+	if n < int64(unit) {
+		return fmt.Sprintf("%d B", n)
+	}
+	value := float64(n)
+	suffixes := []string{"KB", "MB", "GB", "TB"}
+	exp := 0
+	for value >= unit && exp < len(suffixes) {
+		value /= unit
+		exp++
+	}
+	if exp == 0 {
+		return fmt.Sprintf("%d B", n)
+	}
+	return fmt.Sprintf("%.1f %s", value, suffixes[exp-1])
 }
 
 // Touch records access time for a relative path (file or directory). It ignores missing paths.

@@ -8,22 +8,30 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
 // Client is a minimal HTTP API client for the ghh server.
 type Client struct {
-	BaseURL    string
-	Token      string
-	User       string
-	DebugDelay string // DEBUG: request server to add artificial delay (e.g., "90s", "2m")
-	http       *http.Client
-	Endpoint   Endpoints
+	BaseURL          string
+	Token            string
+	User             string
+	DebugDelay       string // DEBUG: request server to add artificial delay (e.g., "90s", "2m")
+	DebugStreamDelay string // DEBUG: request server to slow streaming (e.g., "90s", "2m")
+	RetryMax         int
+	RetryBackoff     time.Duration
+	ProgressInterval time.Duration
+	http             *http.Client
+	Endpoint         Endpoints
 }
 
 // NewClient creates a new API client.
@@ -31,7 +39,15 @@ func NewClient(baseURL, token string, httpClient *http.Client) *Client {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
-	return &Client{BaseURL: strings.TrimRight(baseURL, "/"), Token: token, http: httpClient, Endpoint: DefaultEndpoints()}
+	return &Client{
+		BaseURL:          strings.TrimRight(baseURL, "/"),
+		Token:            token,
+		http:             httpClient,
+		Endpoint:         DefaultEndpoints(),
+		RetryMax:         5,
+		RetryBackoff:     2 * time.Second,
+		ProgressInterval: time.Second,
+	}
 }
 
 // HTTPError wraps non-2xx responses.
@@ -49,32 +65,23 @@ func (c *Client) DownloadPackage(ctx context.Context, pkgURL, destPath string) e
 	if !strings.Contains(c.Endpoint.DownloadPackage, "{url}") {
 		q.Set("url", pkgURL)
 	}
+	if strings.TrimSpace(c.DebugStreamDelay) != "" {
+		q.Set("debug_stream_delay", c.DebugStreamDelay)
+	}
 	path := replacePlaceholders(c.Endpoint.DownloadPackage, map[string]string{"url": pkgURL, "path": ""})
 	endpoint := c.fullURL(path, q)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return err
+	reqBuilder := func(ctx context.Context) (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		if err != nil {
+			return nil, err
+		}
+		c.addAuth(req)
+		req.Header.Set("Accept", "application/octet-stream")
+		return req, nil
 	}
-	c.addAuth(req)
-	req.Header.Set("Accept", "application/octet-stream")
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return &HTTPError{StatusCode: resp.StatusCode, Message: "download package failed", Body: string(body)}
-	}
-
-	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
-		return err
-	}
-	if err := os.RemoveAll(destPath); err != nil {
-		return fmt.Errorf("remove existing file: %w", err)
-	}
-	if err := writeStreamToFile(destPath, resp.Body); err != nil {
+	label := fmt.Sprintf("package %s", filepath.Base(destPath))
+	fmt.Printf("downloading %s ...\n", label)
+	if _, err := c.downloadToFileWithRetry(ctx, destPath, label, reqBuilder); err != nil {
 		return err
 	}
 	fmt.Printf("saved package to %s\n", destPath)
@@ -98,36 +105,26 @@ func (c *Client) Download(ctx context.Context, repo, branch, zipPath, extractDir
 	if strings.TrimSpace(c.DebugDelay) != "" {
 		q.Set("debug_delay", c.DebugDelay)
 	}
+	if strings.TrimSpace(c.DebugStreamDelay) != "" {
+		q.Set("debug_stream_delay", c.DebugStreamDelay)
+	}
 	path := replacePlaceholders(c.Endpoint.Download, map[string]string{"repo": repo, "branch": branch, "path": ""})
 	endpoint := c.fullURL(path, q)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return err
+	reqBuilder := func(ctx context.Context) (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		if err != nil {
+			return nil, err
+		}
+		c.addAuth(req)
+		req.Header.Set("Accept", "application/zip, application/octet-stream")
+		return req, nil
 	}
-	c.addAuth(req)
-	req.Header.Set("Accept", "application/zip, application/octet-stream")
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return &HTTPError{StatusCode: resp.StatusCode, Message: "download failed", Body: string(body)}
-	}
-	commit := strings.TrimSpace(resp.Header.Get("X-GHH-Commit"))
 	fmt.Printf("downloading %s ...\n", repo)
-
-	// Remove existing zip file if it exists
-	if err := os.RemoveAll(zipPath); err != nil {
-		return fmt.Errorf("remove existing zip: %w", err)
-	}
-
-	// Always save the zip file first
-	if err := writeStreamToFile(zipPath, resp.Body); err != nil {
+	headers, err := c.downloadToFileWithRetry(ctx, zipPath, "repo "+repo, reqBuilder)
+	if err != nil {
 		return err
 	}
+	commit := strings.TrimSpace(headers.Get("X-GHH-Commit"))
 	elapsed := time.Since(startTime)
 	fi, _ := os.Stat(zipPath)
 	size := int64(0)
@@ -373,16 +370,294 @@ func (c *Client) fullURL(path string, q url.Values) string {
 	return c.BaseURL + path + "?" + q.Encode()
 }
 
-func writeStreamToFile(dest string, r io.Reader) error {
+func (c *Client) downloadToFileWithRetry(ctx context.Context, destPath, label string, reqBuilder func(context.Context) (*http.Request, error)) (http.Header, error) {
+	attempts := c.retryAttempts()
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		if attempt > 0 {
+			if err := sleepWithBackoff(ctx, c.retryBackoff(), attempt); err != nil {
+				return nil, err
+			}
+		}
+		req, err := reqBuilder(ctx)
+		if err != nil {
+			return nil, err
+		}
+		waitStop := make(chan struct{})
+		var waitPrinted int32
+		started := time.Now()
+		go func() {
+			timer := time.NewTimer(time.Second)
+			defer timer.Stop()
+			for {
+				select {
+				case <-waitStop:
+					return
+				case <-timer.C:
+					atomic.StoreInt32(&waitPrinted, 1)
+					printInline(fmt.Sprintf("waiting for server... %s", time.Since(started).Round(time.Second)), false)
+					timer.Reset(time.Second)
+				}
+			}
+		}()
+		resp, err := c.http.Do(req)
+		close(waitStop)
+		if atomic.LoadInt32(&waitPrinted) == 1 {
+			clearInline()
+		}
+		if err != nil {
+			lastErr = err
+			if attempt == attempts-1 || !isRetryableError(err) {
+				return nil, err
+			}
+			printRetry(attempt, attempts, err)
+			continue
+		}
+		headers := resp.Header.Clone()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+			resp.Body.Close()
+			err := &HTTPError{StatusCode: resp.StatusCode, Message: "download failed", Body: string(body)}
+			lastErr = err
+			if attempt == attempts-1 || !isRetryableStatus(resp.StatusCode) {
+				return nil, err
+			}
+			printRetry(attempt, attempts, err)
+			continue
+		}
+
+		if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+			resp.Body.Close()
+			return nil, err
+		}
+		tmpFile, err := os.CreateTemp(filepath.Dir(destPath), ".tmp-download-*")
+		if err != nil {
+			resp.Body.Close()
+			return nil, err
+		}
+		tmpPath := tmpFile.Name()
+		tmpFile.Close()
+		err = c.copyWithProgress(ctx, tmpPath, resp.Body, resp.ContentLength, label)
+		resp.Body.Close()
+		if err != nil {
+			_ = os.Remove(tmpPath)
+			lastErr = err
+			if attempt == attempts-1 || !isRetryableError(err) {
+				return nil, err
+			}
+			printRetry(attempt, attempts, err)
+			continue
+		}
+		_ = os.Remove(destPath)
+		if err := os.Rename(tmpPath, destPath); err != nil {
+			_ = os.Remove(tmpPath)
+			return nil, err
+		}
+		return headers, nil
+	}
+	return nil, lastErr
+}
+
+func (c *Client) copyWithProgress(ctx context.Context, dest string, r io.Reader, total int64, label string) error {
 	f, err := os.Create(dest)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	if _, err := io.Copy(f, r); err != nil {
-		return err
+
+	var written int64
+	start := time.Now()
+	interval := c.progressInterval()
+	if label == "" {
+		label = "download"
 	}
-	return nil
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-ticker.C:
+				printProgress(label, atomic.LoadInt64(&written), total, start, false)
+			case <-done:
+				printProgress(label, atomic.LoadInt64(&written), total, start, true)
+				return
+			}
+		}
+	}()
+
+	cr := &countingReader{r: r, ctx: ctx, written: &written}
+	_, err = io.Copy(f, cr)
+	close(done)
+	wg.Wait()
+	return err
+}
+
+func (c *Client) retryAttempts() int {
+	if c.RetryMax < 0 {
+		return 1
+	}
+	return c.RetryMax + 1
+}
+
+func (c *Client) retryBackoff() time.Duration {
+	if c.RetryBackoff <= 0 {
+		return 2 * time.Second
+	}
+	return c.RetryBackoff
+}
+
+func (c *Client) progressInterval() time.Duration {
+	if c.ProgressInterval <= 0 {
+		return time.Second
+	}
+	return c.ProgressInterval
+}
+
+type countingReader struct {
+	r       io.Reader
+	ctx     context.Context
+	written *int64
+}
+
+func (cr *countingReader) Read(p []byte) (int, error) {
+	if cr.ctx != nil {
+		select {
+		case <-cr.ctx.Done():
+			return 0, cr.ctx.Err()
+		default:
+		}
+	}
+	n, err := cr.r.Read(p)
+	if n > 0 {
+		atomic.AddInt64(cr.written, int64(n))
+	}
+	return n, err
+}
+
+func printRetry(attempt, attempts int, err error) {
+	next := attempt + 1
+	if next < attempts {
+		fmt.Printf("download failed: %v, retrying (%d/%d)\n", err, next, attempts-1)
+	}
+}
+
+func printProgress(label string, written, total int64, start time.Time, final bool) {
+	elapsed := time.Since(start)
+	if elapsed <= 0 {
+		elapsed = time.Millisecond
+	}
+	speed := float64(written) / elapsed.Seconds()
+	msg := ""
+	if total > 0 {
+		percent := float64(written) / float64(total) * 100
+		if percent > 100 {
+			percent = 100
+		}
+		msg = fmt.Sprintf("%s  %s %s  %3.0f%%  %s/s", label, progressBar(percent, 28), formatBytes(written), percent, formatBytes(int64(speed)))
+	} else {
+		msg = fmt.Sprintf("%s  %s  %s/s", label, formatBytes(written), formatBytes(int64(speed)))
+	}
+	printInline(msg, final)
+}
+
+var progressLastLen int32
+
+func printInline(msg string, final bool) {
+	prev := int(atomic.LoadInt32(&progressLastLen))
+	if len(msg) < prev {
+		msg += strings.Repeat(" ", prev-len(msg))
+	}
+	fmt.Printf("\r%s", msg)
+	atomic.StoreInt32(&progressLastLen, int32(len(msg)))
+	if final {
+		fmt.Print("\n")
+		atomic.StoreInt32(&progressLastLen, 0)
+	}
+}
+
+func clearInline() {
+	prev := int(atomic.LoadInt32(&progressLastLen))
+	if prev > 0 {
+		fmt.Printf("\r%s\r", strings.Repeat(" ", prev))
+		atomic.StoreInt32(&progressLastLen, 0)
+	}
+}
+
+func progressBar(percent float64, width int) string {
+	if width <= 0 {
+		width = 20
+	}
+	if percent < 0 {
+		percent = 0
+	}
+	if percent > 100 {
+		percent = 100
+	}
+	filled := int(math.Round(percent / 100 * float64(width)))
+	if filled > width {
+		filled = width
+	}
+	bar := strings.Repeat("#", filled) + strings.Repeat("-", width-filled)
+	return "[" + bar + "]"
+}
+
+func formatBytes(n int64) string {
+	const unit = 1024.0
+	if n < int64(unit) {
+		return fmt.Sprintf("%d B", n)
+	}
+	value := float64(n)
+	suffixes := []string{"KB", "MB", "GB", "TB"}
+	exp := 0
+	for value >= unit && exp < len(suffixes) {
+		value /= unit
+		exp++
+	}
+	if exp == 0 {
+		return fmt.Sprintf("%d B", n)
+	}
+	return fmt.Sprintf("%.1f %s", value, suffixes[exp-1])
+}
+
+func sleepWithBackoff(ctx context.Context, base time.Duration, attempt int) error {
+	backoff := base * time.Duration(attempt)
+	if backoff <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(backoff)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func isRetryableStatus(status int) bool {
+	return status == http.StatusRequestTimeout ||
+		status == http.StatusTooManyRequests ||
+		status >= 500
+}
+
+func isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var nerr net.Error
+	if errors.As(err, &nerr) {
+		if nerr.Timeout() || nerr.Temporary() {
+			return true
+		}
+	}
+	return true
 }
 
 func extractZip(r io.ReaderAt, size int64, dest string) error {

@@ -1,0 +1,92 @@
+package client
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+func TestDownloadPackage_Retry(t *testing.T) {
+	var attempts int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/download/package", func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&attempts, 1) == 1 {
+			http.Error(w, "temporary", http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Length", "7")
+		_, _ = w.Write([]byte("package"))
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	c := NewClient(server.URL, "", server.Client())
+	c.RetryMax = 1
+	c.RetryBackoff = 0
+	c.ProgressInterval = 10 * time.Millisecond
+
+	dest := filepath.Join(t.TempDir(), "pkg.bin")
+	if err := c.DownloadPackage(context.Background(), "https://example.com/pkg.bin", dest); err != nil {
+		t.Fatalf("DownloadPackage: %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("expected 2 attempts, got %d", attempts)
+	}
+	data, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("read dest: %v", err)
+	}
+	if string(data) != "package" {
+		t.Fatalf("unexpected content: %q", string(data))
+	}
+}
+
+func TestDownloadRepo_Retry(t *testing.T) {
+	var attempts int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/download", func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&attempts, 1) == 1 {
+			http.Error(w, "temporary", http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("X-GHH-Commit", "abc123")
+		w.Header().Set("Content-Length", "7")
+		_, _ = w.Write([]byte("zipdata"))
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	c := NewClient(server.URL, "", server.Client())
+	c.RetryMax = 1
+	c.RetryBackoff = 0
+	c.ProgressInterval = 10 * time.Millisecond
+
+	dest := filepath.Join(t.TempDir(), "repo.zip")
+	if err := c.Download(context.Background(), "owner/repo", "main", dest, ""); err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("expected 2 attempts, got %d", attempts)
+	}
+	data, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("read zip: %v", err)
+	}
+	if string(data) != "zipdata" {
+		t.Fatalf("unexpected zip content: %q", string(data))
+	}
+	commitPath := dest + ".commit.txt"
+	commitData, err := os.ReadFile(commitPath)
+	if err != nil {
+		t.Fatalf("read commit: %v", err)
+	}
+	if strings.TrimSpace(string(commitData)) != "abc123" {
+		t.Fatalf("unexpected commit: %q", string(commitData))
+	}
+}

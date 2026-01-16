@@ -77,16 +77,14 @@ func TestDownloadZip_EscapesSlashBranch(t *testing.T) {
 	dest := filepath.Join(root, "out.zip")
 
 	var seenPath string
-	orig := http.DefaultTransport
-	http.DefaultTransport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+	s.HTTPClient = &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		seenPath = req.URL.EscapedPath()
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Body:       io.NopCloser(strings.NewReader("zipdata")),
 			Header:     make(http.Header),
 		}, nil
-	})
-	t.Cleanup(func() { http.DefaultTransport = orig })
+	})}
 
 	if err := s.downloadZip(ctx, "owner/repo", branch, "", dest); err != nil {
 		t.Fatalf("downloadZip: %v", err)
@@ -109,8 +107,7 @@ func TestFetchBranchSHA_EscapesSlashBranch(t *testing.T) {
 	ctx := context.Background()
 
 	branch := "feature/sub"
-	orig := http.DefaultTransport
-	http.DefaultTransport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+	s.HTTPClient = &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		if !strings.Contains(req.URL.EscapedPath(), "feature%2Fsub") {
 			return nil, fmt.Errorf("path not escaped: %s", req.URL.EscapedPath())
 		}
@@ -120,8 +117,7 @@ func TestFetchBranchSHA_EscapesSlashBranch(t *testing.T) {
 			Body:       io.NopCloser(strings.NewReader(body)),
 			Header:     make(http.Header),
 		}, nil
-	})
-	t.Cleanup(func() { http.DefaultTransport = orig })
+	})}
 
 	sha, err := s.fetchBranchSHA(ctx, "owner/repo", branch, "")
 	if err != nil {
@@ -129,6 +125,86 @@ func TestFetchBranchSHA_EscapesSlashBranch(t *testing.T) {
 	}
 	if sha != "abc123" {
 		t.Fatalf("unexpected sha: %s", sha)
+	}
+}
+
+func TestDownloadZip_RetryOnServerError(t *testing.T) {
+	root := t.TempDir()
+	s := New(root)
+	s.RetryMax = 1
+	s.RetryBackoff = 0
+	ctx := context.Background()
+
+	dest := filepath.Join(root, "out.zip")
+	attempts := 0
+	s.HTTPClient = &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		attempts++
+		if attempts == 1 {
+			return &http.Response{
+				StatusCode: http.StatusInternalServerError,
+				Body:       io.NopCloser(strings.NewReader("temporary")),
+				Header:     make(http.Header),
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader("zipdata")),
+			Header:     make(http.Header),
+		}, nil
+	})}
+
+	if err := s.downloadZip(ctx, "owner/repo", "main", "", dest); err != nil {
+		t.Fatalf("downloadZip: %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("expected 2 attempts, got %d", attempts)
+	}
+	data, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("read dest: %v", err)
+	}
+	if string(data) != "zipdata" {
+		t.Fatalf("unexpected content: %q", string(data))
+	}
+}
+
+func TestDownloadFile_RetryOnServerError(t *testing.T) {
+	root := t.TempDir()
+	s := New(root)
+	s.RetryMax = 1
+	s.RetryBackoff = 0
+	ctx := context.Background()
+
+	dest := filepath.Join(root, "pkg.bin")
+	attempts := 0
+	s.HTTPClient = &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		attempts++
+		if attempts == 1 {
+			return &http.Response{
+				StatusCode: http.StatusBadGateway,
+				Body:       io.NopCloser(strings.NewReader("upstream")),
+				Header:     make(http.Header),
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader("package")),
+			Header:     make(http.Header),
+		}, nil
+	})}
+
+	if err := s.downloadFile(ctx, "https://example.com/package", dest); err != nil {
+		t.Fatalf("downloadFile: %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("expected 2 attempts, got %d", attempts)
+	}
+	data, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("read dest: %v", err)
+	}
+	if string(data) != "package" {
+		t.Fatalf("unexpected content: %q", string(data))
 	}
 }
 

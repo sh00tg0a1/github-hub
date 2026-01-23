@@ -168,7 +168,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "open zip", err)
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	var reader io.Reader = f
 	if fi, err := f.Stat(); err == nil {
 		w.Header().Set("Content-Length", strconv.FormatInt(fi.Size(), 10))
@@ -256,7 +256,7 @@ func (s *Server) handleDownloadPackage(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "open package", err)
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	var reader io.Reader = f
 	if fi, err := f.Stat(); err == nil {
 		w.Header().Set("Content-Length", strconv.FormatInt(fi.Size(), 10))
@@ -331,8 +331,8 @@ func (s *Server) handleDownloadSparse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tmpPath := tmpFile.Name()
-	tmpFile.Close()
-	defer os.Remove(tmpPath)
+	_ = tmpFile.Close()
+	defer func() { _ = os.Remove(tmpPath) }()
 
 	// Export sparse zip
 	commit, err := s.store.ExportSparseZip(ctx, repo, branch, paths, tmpPath)
@@ -352,7 +352,7 @@ func (s *Server) handleDownloadSparse(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "open zip", err)
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	if fi, err := f.Stat(); err == nil {
 		w.Header().Set("Content-Length", strconv.FormatInt(fi.Size(), 10))

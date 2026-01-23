@@ -35,7 +35,7 @@ func TestDirListAndDeleteHandlers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("list status=%d", resp.StatusCode)
 	}
@@ -53,7 +53,7 @@ func TestDirListAndDeleteHandlers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	delResp.Body.Close()
+	_ = delResp.Body.Close()
 	if delResp.StatusCode != http.StatusOK {
 		t.Fatalf("delete status=%d", delResp.StatusCode)
 	}
@@ -63,7 +63,7 @@ func TestDirListAndDeleteHandlers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp2.Body.Close()
+	defer func() { _ = resp2.Body.Close() }()
 	var entries2 []map[string]any
 	if err := json.NewDecoder(resp2.Body).Decode(&entries2); err != nil {
 		t.Fatalf("decode2: %v", err)
@@ -88,7 +88,7 @@ func TestStaticIndexServed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if ct := resp.Header.Get("Content-Type"); ct == "" {
 		t.Fatalf("expected content type for index.html")
 	}
@@ -118,7 +118,7 @@ func TestBadRelPathsAreRejected(t *testing.T) {
 		if err != nil {
 			t.Fatalf("get %s: %v", u, err)
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Fatalf("path %s expected 400, got %d", u, resp.StatusCode)
 		}
@@ -138,7 +138,7 @@ func TestBadRelPathsAreRejected(t *testing.T) {
 		if err != nil {
 			t.Fatalf("delete %s: %v", u, err)
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Fatalf("path %s expected 400, got %d", u, resp.StatusCode)
 		}
@@ -187,7 +187,7 @@ func TestDownloadSparseHandler_Validation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400 for missing repo, got %d", resp.StatusCode)
 	}
@@ -197,7 +197,7 @@ func TestDownloadSparseHandler_Validation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400 for missing paths, got %d", resp.StatusCode)
 	}
@@ -207,7 +207,7 @@ func TestDownloadSparseHandler_Validation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400 for invalid path, got %d", resp.StatusCode)
 	}

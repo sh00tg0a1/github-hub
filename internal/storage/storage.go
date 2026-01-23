@@ -2,7 +2,6 @@ package storage
 
 import (
 	"archive/tar"
-	"archive/zip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -75,12 +74,6 @@ func (s *Storage) EnsurePackage(ctx context.Context, user, pkgURL string) (strin
 	if filename == "" || filename == "." || filename == "/" {
 		filename = "package.bin"
 	}
-	name := filename
-	if idx := strings.Index(name, "."); idx > 0 {
-		name = name[:idx]
-	}
-	name = sanitizeName(name)
-
 	hashStr := PackageHash(pkgURL)
 
 	pkgDir := filepath.Join(s.Root, "users", user, "packages", hashStr)
@@ -100,7 +93,7 @@ func (s *Storage) EnsurePackage(ctx context.Context, user, pkgURL string) (strin
 		return "", err
 	}
 	tmpPath := tmpFile.Name()
-	tmpFile.Close()
+	_ = tmpFile.Close()
 
 	if err := s.downloadFile(ctx, pkgURL, tmpPath); err != nil {
 		_ = os.Remove(tmpPath)
@@ -197,14 +190,13 @@ func (s *Storage) EnsureRepo(ctx context.Context, user, ownerRepo, branch, token
 	// If we have cache and sha matches, reuse (unless force refresh requested).
 	if !force {
 		if info, err := os.Stat(zipPath); err == nil && !info.IsDir() {
-			if remoteSHA != "" {
+			if fetchErr == nil && remoteSHA != "" {
 				if cachedSHA, err := readSHA(metaPath); err == nil && cachedSHA == remoteSHA {
 					_ = s.touch(zipPath)
 					return zipPath, nil
 				}
-			} else if fetchErr != nil {
-				// Cannot verify, force refresh
 			}
+			// If fetchErr != nil, we cannot verify, so we fall through to force refresh
 		}
 	}
 
@@ -214,7 +206,7 @@ func (s *Storage) EnsureRepo(ctx context.Context, user, ownerRepo, branch, token
 		return "", err
 	}
 	tmpPath := tmpFile.Name()
-	tmpFile.Close()
+	_ = tmpFile.Close()
 
 	if err := s.downloadZip(ctx, ownerRepo, branch, token, tmpPath); err != nil {
 		_ = os.Remove(tmpPath)
@@ -383,7 +375,7 @@ func (s *Storage) downloadWithRetry(ctx context.Context, dest string, label stri
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			err := fmt.Errorf("download failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
 			lastErr = err
 			if attempt == attempts-1 || !isRetryableStatus(resp.StatusCode) {
@@ -394,16 +386,16 @@ func (s *Storage) downloadWithRetry(ctx context.Context, dest string, label stri
 
 		tmpFile, err := os.CreateTemp(filepath.Dir(dest), ".tmp-download-*")
 		if err != nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			return err
 		}
 		tmpPath := tmpFile.Name()
-		tmpFile.Close()
+		_ = tmpFile.Close()
 
 		reader := readerFn(resp)
 		out, err := os.Create(tmpPath)
 		if err != nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			_ = os.Remove(tmpPath)
 			return err
 		}
@@ -429,8 +421,8 @@ func (s *Storage) downloadWithRetry(ctx context.Context, dest string, label stri
 
 		cr := &countingReader{r: reader, ctx: ctx, written: &written}
 		_, err = io.Copy(out, cr)
-		out.Close()
-		resp.Body.Close()
+		_ = out.Close()
+		_ = resp.Body.Close()
 		close(done)
 		wg.Wait()
 		if err != nil {
@@ -495,7 +487,7 @@ func isRetryableError(err error) bool {
 	}
 	var nerr net.Error
 	if errors.As(err, &nerr) {
-		if nerr.Timeout() || nerr.Temporary() {
+		if nerr.Timeout() {
 			return true
 		}
 	}
@@ -682,7 +674,7 @@ func (s *Storage) fetchDefaultBranch(ctx context.Context, ownerRepo, token strin
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		return "", fmt.Errorf("fetch repo info failed: %d: %s", resp.StatusCode, string(b))
@@ -720,7 +712,7 @@ func (s *Storage) fetchBranchSHA(ctx context.Context, ownerRepo, branch, token s
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		return "", fmt.Errorf("branch sha failed: status=%d body=%s", resp.StatusCode, string(b))
@@ -1071,64 +1063,6 @@ func (s *Storage) gitRevParse(ctx context.Context, repoPath, ref string) (string
 	return "", fmt.Errorf("cannot resolve ref %q", ref)
 }
 
-// createZipFromDir creates a zip archive from a directory, excluding .git.
-func (s *Storage) createZipFromDir(srcDir, destZip string) error {
-	if err := os.MkdirAll(filepath.Dir(destZip), 0o755); err != nil {
-		return err
-	}
-	f, err := os.Create(destZip)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	zw := zip.NewWriter(f)
-	defer zw.Close()
-
-	return filepath.WalkDir(srcDir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(srcDir, path)
-		if err != nil {
-			return err
-		}
-		// Skip .git directory
-		if rel == ".git" || strings.HasPrefix(rel, ".git"+string(filepath.Separator)) {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if d.IsDir() {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		header, err := zip.FileInfoHeader(info)
-		if err != nil {
-			return err
-		}
-		header.Name = filepath.ToSlash(rel)
-		header.Method = zip.Deflate
-
-		w, err := zw.CreateHeader(header)
-		if err != nil {
-			return err
-		}
-		src, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-		defer src.Close()
-		_, err = io.Copy(w, src)
-		return err
-	})
-}
-
-// copyDirContents copies contents of src to dst, excluding .git.
 // extractTar extracts a tar archive from reader to destDir.
 func extractTar(r io.Reader, destDir string) error {
 	tr := tar.NewReader(r)
@@ -1161,10 +1095,10 @@ func extractTar(r io.Reader, destDir string) error {
 				return err
 			}
 			if _, err := io.Copy(f, tr); err != nil {
-				f.Close()
+				_ = f.Close()
 				return err
 			}
-			f.Close()
+			_ = f.Close()
 		case tar.TypeSymlink:
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				return err
@@ -1177,46 +1111,4 @@ func extractTar(r io.Reader, destDir string) error {
 		}
 	}
 	return nil
-}
-
-func copyDirContents(src, dst string) error {
-	return filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(src, path)
-		if err != nil {
-			return err
-		}
-		// Skip .git directory
-		if rel == ".git" || strings.HasPrefix(rel, ".git"+string(filepath.Separator)) {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		dstPath := filepath.Join(dst, rel)
-		if d.IsDir() {
-			return os.MkdirAll(dstPath, 0o755)
-		}
-		return copyFile(path, dstPath)
-	})
-}
-
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
-	}
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-	_, err = io.Copy(out, in)
-	return err
 }

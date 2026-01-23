@@ -139,7 +139,7 @@ func (c *Client) Download(ctx context.Context, repo, branch, zipPath, extractDir
 		if err != nil {
 			return fmt.Errorf("open zip for extract: %w", err)
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 
 		fi, err := f.Stat()
 		if err != nil {
@@ -225,7 +225,7 @@ func (c *Client) DownloadSparse(ctx context.Context, repo, branch string, paths 
 		if err != nil {
 			return fmt.Errorf("open zip for extract: %w", err)
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 
 		fi, err := f.Stat()
 		if err != nil {
@@ -275,7 +275,7 @@ func (c *Client) fetchCommit(ctx context.Context, repo, branch string) string {
 	if err != nil {
 		return ""
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusNotFound {
 		return ""
 	}
@@ -306,7 +306,7 @@ func (c *Client) SwitchBranch(ctx context.Context, repo, branch string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		return &HTTPError{StatusCode: resp.StatusCode, Message: "switch branch failed", Body: string(b)}
@@ -334,7 +334,7 @@ func (c *Client) ListDir(ctx context.Context, path string, raw bool) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return &HTTPError{StatusCode: resp.StatusCode, Message: "list failed", Body: string(b)}
@@ -387,7 +387,7 @@ func (c *Client) DeleteDir(ctx context.Context, path string, recursive bool) err
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		return &HTTPError{StatusCode: resp.StatusCode, Message: "delete failed", Body: string(b)}
@@ -494,7 +494,7 @@ func (c *Client) downloadToFileWithRetry(ctx context.Context, destPath, label st
 		headers := resp.Header.Clone()
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			err := &HTTPError{StatusCode: resp.StatusCode, Message: "download failed", Body: string(body)}
 			lastErr = err
 			if attempt == attempts-1 || !isRetryableStatus(resp.StatusCode) {
@@ -505,18 +505,18 @@ func (c *Client) downloadToFileWithRetry(ctx context.Context, destPath, label st
 		}
 
 		if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			return nil, err
 		}
 		tmpFile, err := os.CreateTemp(filepath.Dir(destPath), ".tmp-download-*")
 		if err != nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			return nil, err
 		}
 		tmpPath := tmpFile.Name()
-		tmpFile.Close()
+		_ = tmpFile.Close()
 		err = c.copyWithProgress(ctx, tmpPath, resp.Body, resp.ContentLength, label)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if err != nil {
 			_ = os.Remove(tmpPath)
 			lastErr = err
@@ -541,7 +541,7 @@ func (c *Client) copyWithProgress(ctx context.Context, dest string, r io.Reader,
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var written int64
 	start := time.Now()
@@ -731,7 +731,7 @@ func isRetryableError(err error) bool {
 	}
 	var nerr net.Error
 	if errors.As(err, &nerr) {
-		if nerr.Timeout() || nerr.Temporary() {
+		if nerr.Timeout() {
 			return true
 		}
 	}
@@ -779,16 +779,16 @@ func extractZip(r io.ReaderAt, size int64, dest string) error {
 		}
 		out, err := os.OpenFile(fp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, f.Mode())
 		if err != nil {
-			rc.Close()
+			_ = rc.Close()
 			return err
 		}
 		if _, err := io.Copy(out, rc); err != nil {
-			out.Close()
-			rc.Close()
+			_ = out.Close()
+			_ = rc.Close()
 			return err
 		}
-		out.Close()
-		rc.Close()
+		_ = out.Close()
+		_ = rc.Close()
 	}
 	return nil
 }

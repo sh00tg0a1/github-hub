@@ -24,7 +24,6 @@ type fakeStore struct {
 	lastUser   string
 	lastRepo   string
 	lastBranch string
-	lastPkgURL string
 	lastForce  bool
 }
 
@@ -75,7 +74,7 @@ func TestDownloadHandler_UsesStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status=%d", resp.StatusCode)
 	}
@@ -121,7 +120,7 @@ func TestDownloadHandler_ForceRefresh(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if fs.lastForce {
 		t.Fatalf("expected force=false, got true")
 	}
@@ -131,7 +130,7 @@ func TestDownloadHandler_ForceRefresh(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if !fs.lastForce {
 		t.Fatalf("expected force=true, got false")
 	}
@@ -142,7 +141,7 @@ func TestDownloadHandler_ForceRefresh(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if !fs.lastForce {
 		t.Fatalf("expected force=true for force=1, got false")
 	}
@@ -169,7 +168,7 @@ func TestDownloadCommitHandler(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status=%d", resp.StatusCode)
 	}
@@ -197,7 +196,7 @@ func TestDownloadPackageHandler_UsesStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status=%d", resp.StatusCode)
 	}
@@ -230,7 +229,7 @@ func TestBranchSwitchHandler_UsesStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status=%d", resp.StatusCode)
 	}

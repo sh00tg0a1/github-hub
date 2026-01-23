@@ -180,6 +180,82 @@ func (c *Client) Download(ctx context.Context, repo, branch, zipPath, extractDir
 	return nil
 }
 
+// DownloadSparse downloads selected paths from a repository using sparse checkout.
+// paths: list of directory/file prefixes to include
+// zipPath: where to save the zip file
+// extractDir: if non-empty, extract the zip to this directory after download
+func (c *Client) DownloadSparse(ctx context.Context, repo, branch string, paths []string, zipPath, extractDir string) error {
+	startTime := time.Now()
+
+	q := url.Values{}
+	q.Set("repo", repo)
+	if strings.TrimSpace(branch) != "" {
+		q.Set("branch", branch)
+	}
+	q.Set("paths", strings.Join(paths, ","))
+
+	endpoint := c.fullURL(c.Endpoint.DownloadSparse, q)
+	reqBuilder := func(ctx context.Context) (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		if err != nil {
+			return nil, err
+		}
+		c.addAuth(req)
+		req.Header.Set("Accept", "application/zip, application/octet-stream")
+		return req, nil
+	}
+	label := fmt.Sprintf("sparse %s [%s]", repo, strings.Join(paths, ","))
+	fmt.Printf("downloading %s ...\n", label)
+	headers, err := c.downloadToFileWithRetry(ctx, zipPath, label, reqBuilder)
+	if err != nil {
+		return err
+	}
+	commit := strings.TrimSpace(headers.Get("X-GHH-Commit"))
+	elapsed := time.Since(startTime)
+	fi, _ := os.Stat(zipPath)
+	size := int64(0)
+	if fi != nil {
+		size = fi.Size()
+	}
+	fmt.Printf("saved sparse archive to %s (%.2f MB, %s)\n", zipPath, float64(size)/(1024*1024), elapsed.Round(time.Millisecond))
+
+	// If extractDir is specified, extract the zip
+	if extractDir != "" {
+		f, err := os.Open(zipPath)
+		if err != nil {
+			return fmt.Errorf("open zip for extract: %w", err)
+		}
+		defer f.Close()
+
+		fi, err := f.Stat()
+		if err != nil {
+			return fmt.Errorf("stat zip: %w", err)
+		}
+
+		if err := extractZip(f, fi.Size(), extractDir); err != nil {
+			return fmt.Errorf("extract: %w", err)
+		}
+		fmt.Printf("extracted to %s\n", extractDir)
+	}
+
+	// Write commit.txt
+	commitPath := ""
+	if extractDir != "" {
+		commitPath = filepath.Join(extractDir, "commit.txt")
+	} else {
+		commitPath = zipPath + ".commit.txt"
+	}
+	if commit != "" {
+		if err := os.WriteFile(commitPath, []byte(commit+"\n"), 0o644); err != nil {
+			fmt.Printf("warning: failed to save commit info to %s: %v\n", commitPath, err)
+		} else {
+			fmt.Printf("saved commit to %s\n", commitPath)
+		}
+	}
+
+	return nil
+}
+
 func (c *Client) fetchCommit(ctx context.Context, repo, branch string) string {
 	q := url.Values{}
 	if !strings.Contains(c.Endpoint.DownloadCommit, "{repo}") {
@@ -333,6 +409,7 @@ func (c *Client) addAuth(req *http.Request) {
 type Endpoints struct {
 	Download        string
 	DownloadCommit  string
+	DownloadSparse  string
 	BranchSwitch    string
 	DirList         string
 	DirDelete       string
@@ -344,6 +421,7 @@ func DefaultEndpoints() Endpoints {
 	return Endpoints{
 		Download:        "/api/v1/download",
 		DownloadCommit:  "/api/v1/download/commit",
+		DownloadSparse:  "/api/v1/download/sparse",
 		BranchSwitch:    "/api/v1/branch/switch",
 		DirList:         "/api/v1/dir/list",
 		DirDelete:       "/api/v1/dir",

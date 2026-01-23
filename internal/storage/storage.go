@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"archive/tar"
+	"archive/zip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -12,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -31,8 +34,9 @@ type Storage struct {
 	RetryMax        int
 	RetryBackoff    time.Duration
 
-	mu   sync.Mutex
-	lock map[string]*sync.Mutex
+	mu      sync.Mutex
+	lock    map[string]*sync.Mutex
+	rwLock  map[string]*sync.RWMutex // for git cache read/write locks
 }
 
 func sanitizeName(v string) string {
@@ -822,4 +826,397 @@ func (sr *slowReader) Read(p []byte) (n int, err error) {
 		}
 	}
 	return n, err
+}
+
+// ========== Sparse Checkout Support ==========
+
+// acquireGitCacheWrite returns an unlock func for a per-repo git cache write lock.
+// Use this for operations that modify the bare repo (clone, fetch).
+func (s *Storage) acquireGitCacheWrite(ownerRepo string) func() {
+	key := "git-cache|" + ownerRepo
+	s.mu.Lock()
+	if s.rwLock == nil {
+		s.rwLock = make(map[string]*sync.RWMutex)
+	}
+	m, ok := s.rwLock[key]
+	if !ok {
+		m = &sync.RWMutex{}
+		s.rwLock[key] = m
+	}
+	s.mu.Unlock()
+	m.Lock()
+	return m.Unlock
+}
+
+// acquireGitCacheRead returns an unlock func for a per-repo git cache read lock.
+// Use this for operations that only read from the bare repo (export).
+// Multiple readers can hold the lock simultaneously.
+func (s *Storage) acquireGitCacheRead(ownerRepo string) func() {
+	key := "git-cache|" + ownerRepo
+	s.mu.Lock()
+	if s.rwLock == nil {
+		s.rwLock = make(map[string]*sync.RWMutex)
+	}
+	m, ok := s.rwLock[key]
+	if !ok {
+		m = &sync.RWMutex{}
+		s.rwLock[key] = m
+	}
+	s.mu.Unlock()
+	m.RLock()
+	return m.RUnlock
+}
+
+// gitCachePath returns the path to the bare repo cache for a given owner/repo.
+// Layout: <root>/git-cache/<owner>/<repo>.git
+func (s *Storage) gitCachePath(ownerRepo string) string {
+	parts := strings.SplitN(ownerRepo, "/", 2)
+	if len(parts) != 2 {
+		return filepath.Join(s.Root, "git-cache", sanitizeName(ownerRepo)+".git")
+	}
+	return filepath.Join(s.Root, "git-cache", parts[0], parts[1]+".git")
+}
+
+// EnsureBareRepo ensures a bare repo cache exists and is up-to-date.
+// If missing, clones from GitHub. Otherwise, fetches updates.
+// Returns the path to the bare repo.
+func (s *Storage) EnsureBareRepo(ctx context.Context, ownerRepo, token string) (string, error) {
+	ownerRepo = strings.Trim(ownerRepo, "/")
+	if ownerRepo == "" || strings.Count(ownerRepo, "/") != 1 {
+		return "", fmt.Errorf("owner/repo expected: %w", ErrBadPath)
+	}
+
+	unlock := s.acquireGitCacheWrite(ownerRepo)
+	defer unlock()
+
+	barePath := s.gitCachePath(ownerRepo)
+
+	// Build the remote URL with optional token
+	remoteURL := fmt.Sprintf("https://github.com/%s.git", ownerRepo)
+	if strings.TrimSpace(token) != "" {
+		remoteURL = fmt.Sprintf("https://%s@github.com/%s.git", token, ownerRepo)
+	}
+
+	// Check if bare repo exists
+	if _, err := os.Stat(filepath.Join(barePath, "HEAD")); err == nil {
+		// Bare repo exists, fetch updates
+		fmt.Printf("fetching updates for %s...\n", ownerRepo)
+		cmd := exec.CommandContext(ctx, "git", "-C", barePath, "fetch", "--prune", "origin")
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return "", fmt.Errorf("git fetch failed: %w", err)
+		}
+	} else {
+		// Clone bare repo
+		fmt.Printf("cloning bare repo for %s...\n", ownerRepo)
+		if err := os.MkdirAll(filepath.Dir(barePath), 0o755); err != nil {
+			return "", err
+		}
+		cmd := exec.CommandContext(ctx, "git", "clone", "--bare", remoteURL, barePath)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return "", fmt.Errorf("git clone --bare failed: %w", err)
+		}
+	}
+
+	return barePath, nil
+}
+
+// ExportSparseZip exports selected paths from a branch to a zip file using git archive.
+// paths: list of directory/file prefixes to include
+// Returns the commit SHA.
+func (s *Storage) ExportSparseZip(ctx context.Context, ownerRepo, branch string, paths []string, destZip string) (string, error) {
+	if len(paths) == 0 {
+		return "", fmt.Errorf("paths cannot be empty")
+	}
+	for _, p := range paths {
+		if strings.Contains(p, "..") || filepath.IsAbs(p) {
+			return "", fmt.Errorf("invalid path %q: %w", p, ErrBadPath)
+		}
+	}
+
+	// Acquire read lock to prevent concurrent fetch from modifying the bare repo
+	unlock := s.acquireGitCacheRead(ownerRepo)
+	defer unlock()
+
+	barePath := s.gitCachePath(ownerRepo)
+	if _, err := os.Stat(filepath.Join(barePath, "HEAD")); err != nil {
+		return "", fmt.Errorf("bare repo not found, call EnsureBareRepo first")
+	}
+
+	// Resolve branch to ref
+	refName := "origin/" + branch
+	commitSHA, err := s.gitRevParse(ctx, barePath, refName)
+	if err != nil {
+		return "", fmt.Errorf("resolve branch %q: %w", branch, err)
+	}
+
+	fmt.Printf("exporting %s@%s paths %v via git archive...\n", ownerRepo, branch, paths)
+
+	// Use git archive to directly create zip - much faster than worktree+sparse-checkout
+	// git archive --format=zip --output=<dest> <commit> -- path1 path2 ...
+	args := []string{"-C", barePath, "archive", "--format=zip", "--output=" + destZip, commitSHA, "--"}
+	args = append(args, paths...)
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("git archive failed: %w", err)
+	}
+
+	// Return short commit SHA
+	shortSHA := commitSHA
+	if len(shortSHA) > 7 {
+		shortSHA = shortSHA[:7]
+	}
+	return shortSHA, nil
+}
+
+// ExportSparseDir exports selected paths from a branch to a directory using git archive.
+// Returns the commit SHA.
+func (s *Storage) ExportSparseDir(ctx context.Context, ownerRepo, branch string, paths []string, destDir string) (string, error) {
+	if len(paths) == 0 {
+		return "", fmt.Errorf("paths cannot be empty")
+	}
+	for _, p := range paths {
+		if strings.Contains(p, "..") || filepath.IsAbs(p) {
+			return "", fmt.Errorf("invalid path %q: %w", p, ErrBadPath)
+		}
+	}
+
+	// Acquire read lock to prevent concurrent fetch from modifying the bare repo
+	unlock := s.acquireGitCacheRead(ownerRepo)
+	defer unlock()
+
+	barePath := s.gitCachePath(ownerRepo)
+	if _, err := os.Stat(filepath.Join(barePath, "HEAD")); err != nil {
+		return "", fmt.Errorf("bare repo not found, call EnsureBareRepo first")
+	}
+
+	// Resolve branch to ref
+	refName := "origin/" + branch
+	commitSHA, err := s.gitRevParse(ctx, barePath, refName)
+	if err != nil {
+		return "", fmt.Errorf("resolve branch %q: %w", branch, err)
+	}
+
+	fmt.Printf("exporting %s@%s paths %v via git archive...\n", ownerRepo, branch, paths)
+
+	// Use git archive to export to tar and extract directly
+	// git archive --format=tar <commit> -- path1 path2 ... | tar -x -C <destDir>
+	args := []string{"-C", barePath, "archive", "--format=tar", commitSHA, "--"}
+	args = append(args, paths...)
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Stderr = os.Stderr
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", fmt.Errorf("git archive pipe: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("git archive start: %w", err)
+	}
+
+	// Extract tar to destDir
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		return "", err
+	}
+	if err := extractTar(stdout, destDir); err != nil {
+		_ = cmd.Wait()
+		return "", fmt.Errorf("extract tar: %w", err)
+	}
+
+	if err := cmd.Wait(); err != nil {
+		return "", fmt.Errorf("git archive failed: %w", err)
+	}
+
+	shortSHA := commitSHA
+	if len(shortSHA) > 7 {
+		shortSHA = shortSHA[:7]
+	}
+	return shortSHA, nil
+}
+
+// gitRevParse runs git rev-parse to resolve a ref to a commit SHA.
+// For bare repos, it tries multiple ref formats since refs may be stored differently.
+func (s *Storage) gitRevParse(ctx context.Context, repoPath, ref string) (string, error) {
+	// Try the ref as-is first
+	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "rev-parse", ref)
+	out, err := cmd.Output()
+	if err == nil {
+		return strings.TrimSpace(string(out)), nil
+	}
+
+	// For bare repos, refs might be under refs/heads/ directly
+	// Try without origin/ prefix if it was provided
+	if strings.HasPrefix(ref, "origin/") {
+		branchName := strings.TrimPrefix(ref, "origin/")
+		cmd = exec.CommandContext(ctx, "git", "-C", repoPath, "rev-parse", branchName)
+		out, err = cmd.Output()
+		if err == nil {
+			return strings.TrimSpace(string(out)), nil
+		}
+
+		// Also try refs/heads/branch format
+		cmd = exec.CommandContext(ctx, "git", "-C", repoPath, "rev-parse", "refs/heads/"+branchName)
+		out, err = cmd.Output()
+		if err == nil {
+			return strings.TrimSpace(string(out)), nil
+		}
+	}
+
+	return "", fmt.Errorf("cannot resolve ref %q", ref)
+}
+
+// createZipFromDir creates a zip archive from a directory, excluding .git.
+func (s *Storage) createZipFromDir(srcDir, destZip string) error {
+	if err := os.MkdirAll(filepath.Dir(destZip), 0o755); err != nil {
+		return err
+	}
+	f, err := os.Create(destZip)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	zw := zip.NewWriter(f)
+	defer zw.Close()
+
+	return filepath.WalkDir(srcDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(srcDir, path)
+		if err != nil {
+			return err
+		}
+		// Skip .git directory
+		if rel == ".git" || strings.HasPrefix(rel, ".git"+string(filepath.Separator)) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		header, err := zip.FileInfoHeader(info)
+		if err != nil {
+			return err
+		}
+		header.Name = filepath.ToSlash(rel)
+		header.Method = zip.Deflate
+
+		w, err := zw.CreateHeader(header)
+		if err != nil {
+			return err
+		}
+		src, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer src.Close()
+		_, err = io.Copy(w, src)
+		return err
+	})
+}
+
+// copyDirContents copies contents of src to dst, excluding .git.
+// extractTar extracts a tar archive from reader to destDir.
+func extractTar(r io.Reader, destDir string) error {
+	tr := tar.NewReader(r)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+
+		// Sanitize path to prevent directory traversal
+		target := filepath.Join(destDir, filepath.Clean(hdr.Name))
+		if !strings.HasPrefix(target, filepath.Clean(destDir)+string(os.PathSeparator)) {
+			return fmt.Errorf("invalid tar path: %s", hdr.Name)
+		}
+
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				return err
+			}
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(hdr.Mode))
+			if err != nil {
+				return err
+			}
+			if _, err := io.Copy(f, tr); err != nil {
+				f.Close()
+				return err
+			}
+			f.Close()
+		case tar.TypeSymlink:
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			// Remove existing symlink if any
+			_ = os.Remove(target)
+			if err := os.Symlink(hdr.Linkname, target); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func copyDirContents(src, dst string) error {
+	return filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		// Skip .git directory
+		if rel == ".git" || strings.HasPrefix(rel, ".git"+string(filepath.Separator)) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		dstPath := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(dstPath, 0o755)
+		}
+		return copyFile(path, dstPath)
+	})
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, in)
+	return err
 }

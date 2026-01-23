@@ -174,6 +174,49 @@ func main() {
 			exitErr(err)
 		}
 
+	case "download-sparse":
+		cmd := flag.NewFlagSet("download-sparse", flag.ExitOnError)
+		repo := cmd.String("repo", "", "repository identifier (e.g. owner/name)")
+		branch := cmd.String("branch", "", "branch name (default: main)")
+		var pathsFlag multiFlag
+		cmd.Var(&pathsFlag, "path", "directory/file path to include (can be specified multiple times or comma-separated)")
+		dest := cmd.String("dest", "", "destination path (default: current directory)")
+		extract := cmd.Bool("extract", false, "extract zip archive into dest directory")
+		if err := cmd.Parse(args[1:]); err != nil {
+			exitErr(err)
+		}
+		if *repo == "" {
+			fmt.Fprintln(os.Stderr, "download-sparse requires --repo")
+			os.Exit(2)
+		}
+		// Parse paths from flag
+		var paths []string
+		for _, p := range pathsFlag {
+			for _, part := range strings.Split(p, ",") {
+				part = strings.TrimSpace(part)
+				if part != "" {
+					paths = append(paths, part)
+				}
+			}
+		}
+		if len(paths) == 0 {
+			fmt.Fprintln(os.Stderr, "download-sparse requires at least one --path")
+			os.Exit(2)
+		}
+		// Build default name: repo-branch (sanitize branch: replace / with -)
+		defaultName := *repo
+		branchName := strings.TrimSpace(*branch)
+		if branchName == "" {
+			branchName = "main"
+		}
+		// Sanitize branch name for filesystem (e.g., release/0.2.0 -> release-0.2.0)
+		safeBranch := strings.ReplaceAll(branchName, "/", "-")
+		defaultName = defaultName + "-" + safeBranch
+		zipPath, extractDir := resolveDest(defaultName, *dest, *extract)
+		if err := client.DownloadSparse(ctx, *repo, *branch, paths, zipPath, extractDir); err != nil {
+			exitErr(err)
+		}
+
 	case "switch":
 		cmd := flag.NewFlagSet("switch", flag.ExitOnError)
 		repo := cmd.String("repo", "", "repository identifier")
@@ -251,6 +294,15 @@ func exitErr(err error) {
 	os.Exit(1)
 }
 
+// multiFlag allows a flag to be specified multiple times.
+type multiFlag []string
+
+func (f *multiFlag) String() string { return strings.Join(*f, ",") }
+func (f *multiFlag) Set(v string) error {
+	*f = append(*f, v)
+	return nil
+}
+
 func printUsage() {
 	fmt.Print(`ghh - GitHub Hub client (offline-friendly)
 
@@ -259,11 +311,12 @@ Usage:
   Note: paths in ls/rm are relative to user root (users/<user>, default user=default). Omitting --path lists the user root.
 
 Commands:
-  download   Download repository code as archive (optionally extract) or release package (--package URL)
-  switch     Switch repository branch on server
-  ls         List remote directory contents (path is relative to user root; no leading "users/")
-  rm         Delete remote directory (use -r for recursive)
-  help       Show this help message
+  download         Download repository code as archive (optionally extract) or release package (--package URL)
+  download-sparse  Download selected directories from a repository using sparse checkout
+  switch           Switch repository branch on server
+  ls               List remote directory contents (path is relative to user root; no leading "users/")
+  rm               Delete remote directory (use -r for recursive)
+  help             Show this help message
 
 Global Flags:
   --server     Server base URL (env: GHH_BASE_URL) (default: http://localhost:8080)
@@ -285,11 +338,20 @@ Download Flags:
   --debug-delay  DEBUG: request server to add artificial delay (e.g., 90s, 2m)
   --debug-stream-delay  DEBUG: slow down server streaming to client (e.g., 90s, 2m)
 
+Download-Sparse Flags:
+  --repo       Repository identifier (e.g. owner/name)
+  --branch     Branch name (default: main)
+  --path       Directory/file path to include (repeatable or comma-separated)
+  --dest       Destination path (default: current directory)
+  --extract    Extract zip archive into dest directory
+
 Examples:
   ghh --server http://localhost:8080 download --repo foo/bar --branch main
   ghh --server http://localhost:8080 download --repo foo/bar --dest out.zip
   ghh --server http://localhost:8080 download --repo foo --extract
   ghh --server http://localhost:8080 download --package https://example.com/pkg.tar.gz --dest ./pkg.tar.gz
+  ghh --server http://localhost:8080 download-sparse --repo foo/bar --path src --path docs
+  ghh --server http://localhost:8080 download-sparse --repo foo/bar --path src,docs --extract
   ghh --server http://localhost:8080 switch --repo foo/bar --branch dev
   ghh --server http://localhost:8080 ls --path repos/foo/bar
   ghh --server http://localhost:8080 rm --path repos/foo/bar --r
@@ -327,15 +389,26 @@ func resolveDest(repo, dest string, extract bool) (zipPath, extractDir string) {
 		return
 	}
 
-	// dest is a file path (or non-existent path), use as-is
-	zipPath = dest
+	// dest is a file path (or non-existent path)
 	if extract {
-		// Extract to the directory containing the zip file
+		// When extract is true and dest doesn't end with .zip, treat dest as directory
+		if !strings.HasSuffix(strings.ToLower(dest), ".zip") {
+			// Create the directory and extract there
+			extractDir = dest
+			zipPath = filepath.Join(dest, repoName+".zip")
+			return
+		}
+		// dest is a .zip file, extract to its parent directory
+		zipPath = dest
 		extractDir = filepath.Dir(dest)
 		if extractDir == "" {
 			extractDir = "."
 		}
+		return
 	}
+
+	// No extract, just save to dest
+	zipPath = dest
 	return
 }
 

@@ -13,6 +13,10 @@ Practical workflows for running `ghh-server`, using the `ghh` CLI, and browsing 
   - Start server first (see deployment options below).  
   - `bin/ghh --server http://localhost:8080 --user alice --token <PAT> download --repo owner/repo --branch main --dest out.zip`  
   - Use `--extract` to unpack directly into a directory.
+- **Sparse download** (download only specific directories - ideal for large repos):  
+  - `bin/ghh --server http://localhost:8080 download-sparse --repo owner/repo --branch main --path src --dest out.zip`  
+  - Multiple directories: `--path src --path docs --path configs`  
+  - With extraction: `--dest ./project --extract`
 - **Pre-cache branch** (have server download specified branch ahead of time for faster subsequent downloads):  
   - `bin/ghh --server http://localhost:8080 switch --repo owner/repo --branch dev`
 - **Browse cache**:  
@@ -165,6 +169,42 @@ ghh download --repo <owner/repo> --dest <path> [options]
 
 **Note**: The zip file is always saved. With `--extract`, contents are also extracted to the target directory.
 
+#### download-sparse Command
+
+Download only specific directories from a repository using `git archive`. Ideal for large repos where you only need a subset of the code.
+
+```bash
+ghh download-sparse --repo <owner/repo> --path <dir> [--path <dir2>] [--dest <path>] [options]
+```
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--repo` | ✅ | Repository identifier (e.g. `owner/repo`) |
+| `--path` | ✅ | Directory to include (can specify multiple times) |
+| `--dest` | ❌ | Destination path (default: `./<repo>-<branch>.zip`) |
+| `--branch` | ❌ | Branch name (defaults to `main`) |
+| `--extract` | ❌ | Extract to directory after download |
+
+**Examples**:
+```bash
+# Download single directory (auto-named: repo-main.zip)
+ghh download-sparse --repo owner/repo --path src
+
+# Download from specific branch (auto-named: repo-release-0.2.0.zip)
+ghh download-sparse --repo owner/repo --branch release/0.2.0 --path src
+
+# Download multiple directories with explicit name
+ghh download-sparse --repo owner/repo --path src --path docs --dest output.zip
+
+# Download and extract to directory
+ghh download-sparse --repo owner/repo --path src --dest ./project --extract
+```
+
+**Notes**:
+- Default filename includes sanitized branch name (e.g., `release/0.2.0` → `release-0.2.0`)
+- Sparse download uses a shared bare Git cache on the server (`git-cache/<owner>/<repo>.git`), enabling incremental updates via `git fetch`
+- Uses `git archive` for fast direct export from bare repository
+
 #### switch Command
 
 Pre-cache a specific branch (have server download ahead of time).
@@ -237,6 +277,35 @@ Invoke-WebRequest -Uri "http://localhost:8080/api/v1/download?repo=owner/repo" -
 | `branch` | ❌ | Branch name, auto-detects default if empty |
 | `user` | ❌ | User name (can also use `X-GHH-User` header) |
 | `Authorization` | ❌ | Format `Bearer <token>`, for private repos |
+
+### Sparse Download
+
+```bash
+# GET /api/v1/download/sparse
+# Params: repo (required), paths (required, comma-separated), branch (optional)
+
+# Download single directory
+curl -o sparse.zip "http://localhost:8080/api/v1/download/sparse?repo=owner/repo&paths=src"
+
+# Download multiple directories
+curl -o sparse.zip "http://localhost:8080/api/v1/download/sparse?repo=owner/repo&paths=src,docs,configs"
+
+# With specific branch
+curl -o sparse.zip "http://localhost:8080/api/v1/download/sparse?repo=owner/repo&branch=develop&paths=src"
+
+# Windows PowerShell
+Invoke-WebRequest -Uri "http://localhost:8080/api/v1/download/sparse?repo=owner/repo&paths=src" -OutFile sparse.zip
+```
+
+| Param/Header | Required | Description |
+|--------------|----------|-------------|
+| `repo` | ✅ | Repository identifier, format `owner/repo` |
+| `paths` | ✅ | Comma-separated list of directories to include |
+| `branch` | ❌ | Branch name (defaults to `main`) |
+| `Authorization` | ❌ | Format `Bearer <token>`, for private repos |
+
+**Response headers**:
+- `X-GHH-Commit`: Short commit SHA of the downloaded content
 
 ### Branch Switch
 

@@ -27,6 +27,9 @@ var uiFS embed.FS
 type Store interface {
 	EnsureRepo(ctx context.Context, user, ownerRepo, branch, token string, force bool) (string, error)
 	EnsurePackage(ctx context.Context, user, pkgURL string) (string, error)
+	EnsureBareRepo(ctx context.Context, ownerRepo, token string) (string, error)
+	ExportSparseZip(ctx context.Context, ownerRepo, branch string, paths []string, destZip string) (string, error)
+	ExportSparseDir(ctx context.Context, ownerRepo, branch string, paths []string, destDir string) (string, error)
 	List(rel string) ([]storage.Entry, error)
 	Delete(rel string, recursive bool) error
 	Touch(rel string) error
@@ -91,6 +94,7 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/download", s.handleDownload)
 	mux.HandleFunc("/api/v1/download/commit", s.handleDownloadCommit)
 	mux.HandleFunc("/api/v1/download/package", s.handleDownloadPackage)
+	mux.HandleFunc("/api/v1/download/sparse", s.handleDownloadSparse)
 	mux.HandleFunc("/api/v1/branch/switch", s.handleBranchSwitch)
 	mux.HandleFunc("/api/v1/dir/list", s.handleDirList)
 	mux.HandleFunc("/api/v1/dir", s.handleDir)
@@ -267,6 +271,98 @@ func (s *Server) handleDownloadPackage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fmt.Printf("package download ok user=%s url=%s path=%s\n", user, pkgURL, filePath)
+}
+
+func (s *Server) handleDownloadSparse(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	token := tokenFromRequest(r, s.token)
+	repo := strings.TrimSpace(r.URL.Query().Get("repo"))
+	branch := strings.TrimSpace(r.URL.Query().Get("branch"))
+	pathsParam := strings.TrimSpace(r.URL.Query().Get("paths"))
+	if repo == "" {
+		http.Error(w, "missing repo", http.StatusBadRequest)
+		return
+	}
+	if pathsParam == "" {
+		http.Error(w, "missing paths", http.StatusBadRequest)
+		return
+	}
+	// Parse paths (comma-separated)
+	var paths []string
+	for _, p := range strings.Split(pathsParam, ",") {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		// Validate path
+		if strings.Contains(p, "..") || filepath.IsAbs(p) {
+			http.Error(w, fmt.Sprintf("invalid path: %s", p), http.StatusBadRequest)
+			return
+		}
+		paths = append(paths, p)
+	}
+	if len(paths) == 0 {
+		http.Error(w, "no valid paths provided", http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), s.downloadTO)
+	defer cancel()
+
+	// Ensure bare repo is up-to-date
+	if _, err := s.store.EnsureBareRepo(ctx, repo, token); err != nil {
+		fmt.Printf("sparse download error repo=%s err=%v\n", repo, err)
+		httpError(w, "ensure bare repo", err)
+		return
+	}
+
+	// If branch not specified, use "main" as default (could also fetch default branch)
+	if branch == "" {
+		branch = "main"
+	}
+
+	// Create temp zip file
+	tmpFile, err := os.CreateTemp("", "sparse-*.zip")
+	if err != nil {
+		httpError(w, "create temp file", err)
+		return
+	}
+	tmpPath := tmpFile.Name()
+	tmpFile.Close()
+	defer os.Remove(tmpPath)
+
+	// Export sparse zip
+	commit, err := s.store.ExportSparseZip(ctx, repo, branch, paths, tmpPath)
+	if err != nil {
+		fmt.Printf("sparse export error repo=%s branch=%s paths=%v err=%v\n", repo, branch, paths, err)
+		httpError(w, "export sparse", err)
+		return
+	}
+
+	// Set headers
+	w.Header().Set("X-GHH-Commit", commit)
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s-sparse.zip\"", safeName(repo, branch)))
+
+	f, err := os.Open(tmpPath)
+	if err != nil {
+		httpError(w, "open zip", err)
+		return
+	}
+	defer f.Close()
+
+	if fi, err := f.Stat(); err == nil {
+		w.Header().Set("Content-Length", strconv.FormatInt(fi.Size(), 10))
+	}
+
+	if _, err := io.Copy(w, f); err != nil {
+		fmt.Printf("sparse stream error repo=%s branch=%s err=%v\n", repo, branch, err)
+		return
+	}
+	fmt.Printf("sparse download ok repo=%s branch=%s paths=%v commit=%s\n", repo, branch, paths, commit)
 }
 
 func (s *Server) handleBranchSwitch(w http.ResponseWriter, r *http.Request) {

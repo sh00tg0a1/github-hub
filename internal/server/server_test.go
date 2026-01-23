@@ -170,3 +170,45 @@ func TestShutdownStopsJanitor(t *testing.T) {
 	s.Shutdown()
 	s.Shutdown()
 }
+
+func TestDownloadSparseHandler_Validation(t *testing.T) {
+	root := t.TempDir()
+	s, err := NewServer(root, "default", "", defaultDownloadTimeout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	s.RegisterRoutes(mux)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	// Test missing repo
+	resp, err := http.Get(ts.URL + "/api/v1/download/sparse?paths=src")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing repo, got %d", resp.StatusCode)
+	}
+
+	// Test missing paths
+	resp, err = http.Get(ts.URL + "/api/v1/download/sparse?repo=owner/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing paths, got %d", resp.StatusCode)
+	}
+
+	// Test invalid path with ..
+	resp, err = http.Get(ts.URL + "/api/v1/download/sparse?repo=owner/repo&paths=../etc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid path, got %d", resp.StatusCode)
+	}
+}

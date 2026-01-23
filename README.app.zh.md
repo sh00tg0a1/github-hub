@@ -13,6 +13,10 @@
   - 先启动服务端（见下方部署选项）。  
   - `bin/ghh --server http://localhost:8080 --user alice --token <PAT> download --repo owner/repo --branch main --dest out.zip`  
   - 使用 `--extract` 直接解压到目录。
+- **稀疏下载**（仅下载指定目录 - 适用于大型仓库）：  
+  - `bin/ghh --server http://localhost:8080 download-sparse --repo owner/repo --branch main --path src --dest out.zip`  
+  - 多个目录：`--path src --path docs --path configs`  
+  - 带解压：`--dest ./project --extract`
 - **预缓存分支**（让服务端提前下载指定分支，后续下载更快）：  
   - `bin/ghh --server http://localhost:8080 switch --repo owner/repo --branch dev`
 - **浏览缓存**：  
@@ -163,6 +167,42 @@ ghh download --repo <owner/repo> --dest <路径> [选项]
 
 **注意**：zip 文件始终会保存。带 `--extract` 时，内容会同时解压到目标目录。
 
+#### download-sparse 命令
+
+使用 `git archive` 仅下载仓库中的指定目录。适用于大型仓库只需要部分代码的场景。
+
+```bash
+ghh download-sparse --repo <owner/repo> --path <目录> [--path <目录2>] [--dest <路径>] [选项]
+```
+
+| 参数 | 必填 | 说明 |
+|------|------|------|
+| `--repo` | ✅ | 仓库标识（如 `owner/repo`） |
+| `--path` | ✅ | 要包含的目录（可多次指定） |
+| `--dest` | ❌ | 目标路径（默认：`./<repo>-<branch>.zip`） |
+| `--branch` | ❌ | 分支名（默认 `main`） |
+| `--extract` | ❌ | 下载后解压到目录 |
+
+**示例**：
+```bash
+# 下载单个目录（自动命名：repo-main.zip）
+ghh download-sparse --repo owner/repo --path src
+
+# 下载指定分支（自动命名：repo-release-0.2.0.zip）
+ghh download-sparse --repo owner/repo --branch release/0.2.0 --path src
+
+# 下载多个目录并指定文件名
+ghh download-sparse --repo owner/repo --path src --path docs --dest output.zip
+
+# 下载并解压到目录
+ghh download-sparse --repo owner/repo --path src --dest ./project --extract
+```
+
+**说明**：
+- 默认文件名包含清理后的分支名（如 `release/0.2.0` → `release-0.2.0`）
+- 稀疏下载使用服务端的共享 bare Git 缓存（`git-cache/<owner>/<repo>.git`），通过 `git fetch` 实现增量更新
+- 使用 `git archive` 从 bare 仓库直接快速导出
+
 #### switch 命令
 
 预缓存指定分支（让服务端提前下载）。
@@ -235,6 +275,35 @@ Invoke-WebRequest -Uri "http://localhost:8080/api/v1/download?repo=owner/repo" -
 | `branch` | ❌ | 分支名，留空则自动获取默认分支 |
 | `user` | ❌ | 用户名（也可通过 `X-GHH-User` header 传递） |
 | `Authorization` | ❌ | 格式 `Bearer <token>`，用于私有仓库 |
+
+### 稀疏下载
+
+```bash
+# GET /api/v1/download/sparse
+# 参数: repo (必需), paths (必需，逗号分隔), branch (可选)
+
+# 下载单个目录
+curl -o sparse.zip "http://localhost:8080/api/v1/download/sparse?repo=owner/repo&paths=src"
+
+# 下载多个目录
+curl -o sparse.zip "http://localhost:8080/api/v1/download/sparse?repo=owner/repo&paths=src,docs,configs"
+
+# 指定分支
+curl -o sparse.zip "http://localhost:8080/api/v1/download/sparse?repo=owner/repo&branch=develop&paths=src"
+
+# Windows PowerShell
+Invoke-WebRequest -Uri "http://localhost:8080/api/v1/download/sparse?repo=owner/repo&paths=src" -OutFile sparse.zip
+```
+
+| 参数/Header | 必需 | 说明 |
+|-------------|------|------|
+| `repo` | ✅ | 仓库标识，格式 `owner/repo` |
+| `paths` | ✅ | 逗号分隔的目录列表 |
+| `branch` | ❌ | 分支名（默认 `main`） |
+| `Authorization` | ❌ | 格式 `Bearer <token>`，用于私有仓库 |
+
+**响应头**：
+- `X-GHH-Commit`：下载内容的短提交 SHA
 
 ### 预缓存分支
 

@@ -213,3 +213,101 @@ type roundTripperFunc func(*http.Request) (*http.Response, error)
 func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 	return f(r)
 }
+
+func TestExportSparseZip_PathValidation(t *testing.T) {
+	root := t.TempDir()
+	s := New(root)
+	ctx := context.Background()
+
+	// Test invalid paths
+	testCases := []struct {
+		name  string
+		paths []string
+	}{
+		{"empty paths", []string{}},
+		{"path with ..", []string{"foo/../bar"}},
+		{"absolute path", []string{"/etc/passwd"}},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := s.ExportSparseZip(ctx, "owner/repo", "main", tc.paths, filepath.Join(root, "out.zip"))
+			if err == nil {
+				t.Fatalf("expected error for %s", tc.name)
+			}
+		})
+	}
+}
+
+func TestExportSparseDir_PathValidation(t *testing.T) {
+	root := t.TempDir()
+	s := New(root)
+	ctx := context.Background()
+
+	// Test invalid paths
+	testCases := []struct {
+		name  string
+		paths []string
+	}{
+		{"empty paths", []string{}},
+		{"path with ..", []string{"../escape"}},
+		{"absolute path", []string{"/root/secret"}},
+		{"mixed valid and invalid", []string{"src", "foo/../bar"}},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := s.ExportSparseDir(ctx, "owner/repo", "main", tc.paths, filepath.Join(root, "out"))
+			if err == nil {
+				t.Fatalf("expected error for %s", tc.name)
+			}
+		})
+	}
+}
+
+func TestEnsureBareRepo_InvalidRepo(t *testing.T) {
+	root := t.TempDir()
+	s := New(root)
+	ctx := context.Background()
+
+	// Test invalid repo formats
+	testCases := []struct {
+		name      string
+		ownerRepo string
+	}{
+		{"empty", ""},
+		{"no slash", "repo"},
+		{"too many slashes", "owner/repo/extra"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := s.EnsureBareRepo(ctx, tc.ownerRepo, "")
+			if err == nil {
+				t.Fatalf("expected error for %s", tc.name)
+			}
+		})
+	}
+}
+
+func TestGitCachePath(t *testing.T) {
+	root := t.TempDir()
+	s := New(root)
+
+	testCases := []struct {
+		ownerRepo string
+		expected  string
+	}{
+		{"owner/repo", filepath.Join(root, "git-cache", "owner", "repo.git")},
+		{"foo/bar", filepath.Join(root, "git-cache", "foo", "bar.git")},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.ownerRepo, func(t *testing.T) {
+			result := s.gitCachePath(tc.ownerRepo)
+			if result != tc.expected {
+				t.Fatalf("expected %q, got %q", tc.expected, result)
+			}
+		})
+	}
+}

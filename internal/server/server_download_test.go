@@ -40,6 +40,15 @@ func (f *fakeStore) EnsurePackage(ctx context.Context, user, pkgURL string) (str
 	f.lastRepo = pkgURL
 	return f.ensurePkg, f.ensureErr
 }
+func (f *fakeStore) EnsureBareRepo(ctx context.Context, ownerRepo, token string) (string, error) {
+	return "", nil
+}
+func (f *fakeStore) ExportSparseZip(ctx context.Context, ownerRepo, branch string, paths []string, destZip string) (string, error) {
+	return "", nil
+}
+func (f *fakeStore) ExportSparseDir(ctx context.Context, ownerRepo, branch string, paths []string, destDir string) (string, error) {
+	return "", nil
+}
 func (f *fakeStore) List(rel string) ([]storage.Entry, error) { return nil, nil }
 func (f *fakeStore) Delete(rel string, recursive bool) error  { return nil }
 func (f *fakeStore) Touch(rel string) error                   { return nil }

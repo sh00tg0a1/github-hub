@@ -411,8 +411,19 @@ func (s *Server) handleDirList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad path", http.StatusBadRequest)
 		return
 	}
-	_ = s.store.Touch(s.userPath(user, rel))
-	list, err := s.store.List(s.userPath(user, rel))
+
+	// Support listing git-cache directory (shared bare repo cache)
+	cleanRel := strings.TrimLeft(filepath.ToSlash(rel), "./")
+	var listPath string
+	if strings.HasPrefix(cleanRel, "git-cache") || cleanRel == "git-cache" {
+		// List git-cache directly (no user prefix)
+		listPath = cleanRel
+	} else {
+		listPath = s.userPath(user, rel)
+		_ = s.store.Touch(listPath)
+	}
+
+	list, err := s.store.List(listPath)
 	if err != nil {
 		// Return empty list for not found paths (e.g., new user with no cached repos)
 		if errors.Is(err, storage.ErrNotFound) {
@@ -423,8 +434,19 @@ func (s *Server) handleDirList(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+
+	// Add git-cache to root listing if it exists
+	if cleanRel == "" || cleanRel == "." {
+		if gcList, err := s.store.List("git-cache"); err == nil && len(gcList) > 0 {
+			list = append(list, storage.Entry{
+				Name:  "git-cache",
+				IsDir: true,
+				Size:  0,
+			})
+		}
+	}
+
 	// Rewrite paths to be relative to user root (no users/<user> prefix), so UI can delete correctly.
-	cleanRel := strings.TrimLeft(filepath.ToSlash(rel), "./")
 	for i := range list {
 		name := list[i].Name
 		if cleanRel == "" || cleanRel == "." {

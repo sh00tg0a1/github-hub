@@ -472,8 +472,12 @@ func (s *Server) handleDir(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "bad path", http.StatusBadRequest)
 			return
 		}
-		// Path coming from UI is relative to user root. Normalize to absolute user path here.
-		if strings.HasPrefix(rel, "users/") || strings.HasPrefix(rel, "users\\") {
+		// Normalize path based on prefix
+		cleanRel := strings.TrimLeft(filepath.ToSlash(rel), "./")
+		if strings.HasPrefix(cleanRel, "git-cache") {
+			// git-cache paths are used directly (no user prefix)
+			rel = cleanRel
+		} else if strings.HasPrefix(rel, "users/") || strings.HasPrefix(rel, "users\\") {
 			// already absolute-ish, keep as-is
 		} else {
 			rel = s.userPath(user, rel)

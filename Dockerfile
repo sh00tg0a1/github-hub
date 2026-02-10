@@ -23,4 +23,3 @@ VOLUME ["/data"]
 ENV GITHUB_TOKEN=""
 ENTRYPOINT ["/usr/local/bin/ghh-server"]
 CMD ["--addr", ":8080", "--root", "/data"]
-

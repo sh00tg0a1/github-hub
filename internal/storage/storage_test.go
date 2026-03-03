@@ -2,6 +2,8 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -9,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestListAndDelete(t *testing.T) {
@@ -307,5 +310,100 @@ func TestGitCachePath(t *testing.T) {
 				t.Fatalf("expected %q, got %q", tc.expected, result)
 			}
 		})
+	}
+}
+
+func TestReadRepoInfo(t *testing.T) {
+	root := t.TempDir()
+	s := New(root)
+
+	zipPath := filepath.Join(root, "main.zip")
+	infoPath := filepath.Join(root, "main.info.json")
+	info := &RepoInfo{
+		Repo:          "owner/repo",
+		Branch:        "main",
+		CommitSHA:     "abc123",
+		CommitMessage: "fix",
+		ChangedFiles:  []string{"M\tfoo.go"},
+	}
+	b, _ := json.MarshalIndent(info, "", "  ")
+	if err := os.WriteFile(infoPath, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.ReadRepoInfo(zipPath)
+	if err != nil {
+		t.Fatalf("ReadRepoInfo: %v", err)
+	}
+	if got.Repo != info.Repo || got.CommitSHA != info.CommitSHA {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestReadRepoInfo_NotFound(t *testing.T) {
+	root := t.TempDir()
+	s := New(root)
+	zipPath := filepath.Join(root, "main.zip")
+	_, err := s.ReadRepoInfo(zipPath)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestList_FiltersInfoJSON(t *testing.T) {
+	root := t.TempDir()
+	s := New(root)
+	if err := os.WriteFile(filepath.Join(root, "a.zip"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "a.info.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := s.List(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, len(entries))
+	for i, e := range entries {
+		names[i] = e.Name
+	}
+	if len(names) != 1 || names[0] != "a.zip" {
+		t.Fatalf("expected [a.zip], got %v", names)
+	}
+}
+
+func TestCleanupExpired_RemovesInfoJSON(t *testing.T) {
+	root := t.TempDir()
+	s := New(root)
+	repoDir := filepath.Join(root, "users", "default", "repos", "owner", "repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	zipPath := filepath.Join(repoDir, "main.zip")
+	infoPath := filepath.Join(repoDir, "main.info.json")
+	if err := os.WriteFile(zipPath, []byte("zip"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(infoPath, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Set mtime to the past so it's expired
+	past := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(zipPath, past, past); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.CleanupExpired(24 * time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(zipPath); err == nil {
+		t.Fatal("zip should be removed")
+	}
+	if _, err := os.Stat(infoPath); err == nil {
+		t.Fatal("info.json should be removed")
 	}
 }

@@ -26,6 +26,16 @@ var (
 	ErrNotFound = errors.New("not found")
 )
 
+// RepoInfo holds metadata written to info.json after download.
+// Fields match git-derived info: repo (owner/repo), branch, commit_sha, commit_message, changed_files.
+type RepoInfo struct {
+	Repo          string   `json:"repo"`
+	Branch        string   `json:"branch"`
+	CommitSHA     string   `json:"commit_sha"`
+	CommitMessage string   `json:"commit_message"`
+	ChangedFiles  []string `json:"changed_files"`
+}
+
 type Storage struct {
 	Root            string
 	HTTPClient      *http.Client
@@ -264,6 +274,21 @@ func (s *Storage) ensureRepoViaGit(ctx context.Context, user, ownerRepo, branch,
 		short = short[:7]
 	}
 	_ = writeSHA(commitPath, short)
+
+	// Write info.json (repo, branch, commit_sha, commit_message, changed_files)
+	infoPath := strings.TrimSuffix(zipPath, ".zip") + ".info.json"
+	info := &RepoInfo{
+		Repo:          ownerRepo,
+		Branch:        branch,
+		CommitSHA:     remoteSHA,
+		CommitMessage: s.gitLogCommitMessage(ctx, barePath, remoteSHA),
+		ChangedFiles:  s.gitDiffChangedFiles(ctx, barePath, remoteSHA),
+	}
+	if info.ChangedFiles == nil {
+		info.ChangedFiles = []string{}
+	}
+	_ = writeInfoJSON(infoPath, info)
+
 	_ = s.touch(zipPath)
 	return zipPath, nil
 }
@@ -346,6 +371,17 @@ func (s *Storage) ensureRepoLegacy(ctx context.Context, user, ownerRepo, branch,
 			short = short[:7]
 		}
 		_ = writeSHA(commitPath, short)
+
+		// Write info.json (legacy mode: no bare repo, so commit_message/changed_files empty)
+		infoPath := strings.TrimSuffix(zipPath, ".zip") + ".info.json"
+		info := &RepoInfo{
+			Repo:          ownerRepo,
+			Branch:        branch,
+			CommitSHA:     remoteSHA,
+			CommitMessage: "",
+			ChangedFiles:  []string{},
+		}
+		_ = writeInfoJSON(infoPath, info)
 	} else {
 		_ = os.Remove(metaPath)
 		// 若无法获取远端 SHA，则保持已有 commit 文件（如果存在），不强删
@@ -369,7 +405,7 @@ func (s *Storage) List(rel string) ([]Entry, error) {
 	}
 	result := make([]Entry, 0, len(entries))
 	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".meta") {
+		if strings.HasSuffix(e.Name(), ".meta") || strings.HasSuffix(e.Name(), ".info.json") {
 			continue
 		}
 		info, _ := e.Info()
@@ -728,9 +764,11 @@ func (s *Storage) CleanupExpired(ttl time.Duration) error {
 				return nil
 			}
 			if expired(path, cutoff) {
+				base := strings.TrimSuffix(path, ".zip")
 				_ = os.Remove(path)
 				_ = os.Remove(path + ".meta")
-				_ = os.Remove(strings.TrimSuffix(path, ".zip") + ".commit.txt")
+				_ = os.Remove(base + ".commit.txt")
+				_ = os.Remove(base + ".info.json")
 				trimEmpty(filepath.Dir(path), filepath.Join(s.Root, "users"))
 			}
 		case "packages":
@@ -1209,6 +1247,67 @@ func (s *Storage) gitRevParse(ctx context.Context, repoPath, ref string) (string
 	}
 
 	return "", fmt.Errorf("cannot resolve ref %q", ref)
+}
+
+// gitLogCommitMessage runs git log -1 --format=%B <sha> in the bare repo.
+func (s *Storage) gitLogCommitMessage(ctx context.Context, barePath, sha string) string {
+	cmd := exec.CommandContext(ctx, "git", "-C", barePath, "log", "-1", "--format=%B", sha)
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// gitDiffChangedFiles runs git diff --name-status <sha>^..<sha> in the bare repo.
+// Returns empty slice if parent commit does not exist or command fails.
+func (s *Storage) gitDiffChangedFiles(ctx context.Context, barePath, sha string) []string {
+	cmd := exec.CommandContext(ctx, "git", "-C", barePath, "diff", "--name-status", sha+"^.."+sha)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	result := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		result = append(result, line)
+	}
+	return result
+}
+
+// writeInfoJSON writes RepoInfo to info.json sidecar.
+func writeInfoJSON(path string, info *RepoInfo) error {
+	b, err := json.MarshalIndent(info, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, b, 0o644)
+}
+
+// readInfoJSON reads RepoInfo from info.json.
+func readInfoJSON(path string) (*RepoInfo, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	var info RepoInfo
+	if err := json.Unmarshal(b, &info); err != nil {
+		return nil, err
+	}
+	return &info, nil
+}
+
+// ReadRepoInfo reads RepoInfo for a cached repo zip. Pass the zip path; it reads the sidecar .info.json.
+func (s *Storage) ReadRepoInfo(zipPath string) (*RepoInfo, error) {
+	infoPath := strings.TrimSuffix(zipPath, ".zip") + ".info.json"
+	return readInfoJSON(infoPath)
 }
 
 // extractTar extracts a tar archive from reader to destDir.

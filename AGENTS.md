@@ -29,7 +29,11 @@
 - PR 包含：动机、方案、影响面、运行与测试方式；关联 Issue；如改动行为/配置，更新 `README.md` 与 `configs/config.example.yaml`。
 - 小步提交、单一职责；附关键 CLI 输出/截图有助评审。
 
--## 安全与配置提示
+## 安全与配置提示
 - 不提交密钥；通过环境变量或未追踪文件注入；提供 `configs/config.example.yaml` 模板。
 - 配置加载：支持 `--config` 或 `GHH_CONFIG` 指定 YAML（亦兼容 JSON）；字段含 `base_url`、`token` 与 `user`。
 - 默认离线安全：支持 `-mod=vendor`；对外部输入（URL、路径）进行校验与规范化。
+
+## 关键行为
+
+写完代码后必须要进行测试

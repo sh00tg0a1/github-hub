@@ -34,6 +34,7 @@ type Store interface {
 	Delete(rel string, recursive bool) error
 	Touch(rel string) error
 	CleanupExpired(ttl time.Duration) error
+	ReadRepoInfo(zipPath string) (*storage.RepoInfo, error)
 }
 
 type Server struct {
@@ -93,6 +94,7 @@ func NewServerWithStore(store Store, githubToken, defaultUser string) *Server {
 func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/download", s.handleDownload)
 	mux.HandleFunc("/api/v1/download/commit", s.handleDownloadCommit)
+	mux.HandleFunc("/api/v1/download/info", s.handleDownloadInfo)
 	mux.HandleFunc("/api/v1/download/package", s.handleDownloadPackage)
 	mux.HandleFunc("/api/v1/download/sparse", s.handleDownloadSparse)
 	mux.HandleFunc("/api/v1/branch/switch", s.handleBranchSwitch)
@@ -220,6 +222,46 @@ func (s *Server) handleDownloadCommit(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	_, _ = w.Write([]byte(commit + "\n"))
+}
+
+func (s *Server) handleDownloadInfo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	user := s.resolveUser(r)
+	token := tokenFromRequest(r, s.token)
+	repo := strings.TrimSpace(r.URL.Query().Get("repo"))
+	branch := strings.TrimSpace(r.URL.Query().Get("branch"))
+	legacy, _ := strconv.ParseBool(r.URL.Query().Get("legacy"))
+	if repo == "" {
+		http.Error(w, "missing repo", http.StatusBadRequest)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), s.downloadTO)
+	defer cancel()
+
+	zipPath, err := s.store.EnsureRepo(ctx, user, repo, branch, token, false, legacy)
+	if err != nil {
+		fmt.Printf("download info error user=%s repo=%s branch=%s err=%v\n", user, repo, branch, err)
+		httpError(w, "ensure repo", err)
+		return
+	}
+	info, err := s.store.ReadRepoInfo(zipPath)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			http.NotFound(w, r)
+			return
+		}
+		fmt.Printf("read repo info error path=%s err=%v\n", zipPath, err)
+		httpError(w, "read repo info", err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err := json.NewEncoder(w).Encode(info); err != nil {
+		fmt.Printf("download info encode error user=%s repo=%s err=%v\n", user, repo, err)
+		return
+	}
 }
 
 func (s *Server) handleDownloadPackage(w http.ResponseWriter, r *http.Request) {

@@ -21,6 +21,7 @@ type fakeStore struct {
 	ensurePath string
 	ensurePkg  string
 	ensureErr  error
+	ensureInfo *storage.RepoInfo
 	lastUser   string
 	lastRepo   string
 	lastBranch string
@@ -52,6 +53,12 @@ func (f *fakeStore) List(rel string) ([]storage.Entry, error) { return nil, nil 
 func (f *fakeStore) Delete(rel string, recursive bool) error  { return nil }
 func (f *fakeStore) Touch(rel string) error                   { return nil }
 func (f *fakeStore) CleanupExpired(ttl time.Duration) error   { return nil }
+func (f *fakeStore) ReadRepoInfo(zipPath string) (*storage.RepoInfo, error) {
+	if f.ensureInfo != nil {
+		return f.ensureInfo, nil
+	}
+	return nil, storage.ErrNotFound
+}
 
 func TestDownloadHandler_UsesStore(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -100,6 +107,70 @@ func TestDownloadHandler_UsesStore(t *testing.T) {
 
 	if fs.lastRepo != "own/repo" || fs.lastBranch != "main" || fs.lastUser != "default" {
 		t.Fatalf("store called with user=%s repo=%s branch=%s", fs.lastUser, fs.lastRepo, fs.lastBranch)
+	}
+}
+
+func TestDownloadInfoHandler(t *testing.T) {
+	tmpDir := t.TempDir()
+	zipPath := filepath.Join(tmpDir, "repo.zip")
+	createZip(t, zipPath)
+
+	info := &storage.RepoInfo{
+		Repo:          "own/repo",
+		Branch:        "main",
+		CommitSHA:     "abc123def456",
+		CommitMessage: "fix: something",
+		ChangedFiles:  []string{"M\tfoo.go", "A\tbar.go"},
+	}
+	fs := &fakeStore{ensurePath: zipPath, ensureInfo: info}
+	s := NewServerWithStore(fs, "", "default")
+	mux := http.NewServeMux()
+	s.RegisterRoutes(mux)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/api/v1/download/info?repo=own/repo&branch=main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	var got storage.RepoInfo
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Repo != info.Repo || got.Branch != info.Branch || got.CommitSHA != info.CommitSHA {
+		t.Fatalf("got repo=%q branch=%q commit_sha=%q", got.Repo, got.Branch, got.CommitSHA)
+	}
+	if got.CommitMessage != info.CommitMessage {
+		t.Fatalf("commit_message=%q", got.CommitMessage)
+	}
+	if len(got.ChangedFiles) != 2 {
+		t.Fatalf("changed_files len=%d", len(got.ChangedFiles))
+	}
+}
+
+func TestDownloadInfoHandler_NotFound(t *testing.T) {
+	tmpDir := t.TempDir()
+	zipPath := filepath.Join(tmpDir, "repo.zip")
+	createZip(t, zipPath)
+
+	fs := &fakeStore{ensurePath: zipPath, ensureInfo: nil}
+	s := NewServerWithStore(fs, "", "default")
+	mux := http.NewServeMux()
+	s.RegisterRoutes(mux)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/api/v1/download/info?repo=own/repo&branch=main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
 	}
 }
 

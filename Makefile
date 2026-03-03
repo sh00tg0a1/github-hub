@@ -31,7 +31,7 @@ ifneq ($(strip $(BUILD_DATE)),)
 endif
 LDFLAGS := -ldflags '$(strip $(LDVARS))'
 
-.PHONY: all build build-server build-client build-static build-server-static build-client-static run run-server test vet fmt clean install uninstall
+.PHONY: all build build-server build-client build-static build-server-static build-client-static run run-server test test-json test-unit vet fmt clean install uninstall
 .PHONY: build-cross
 
 all: build
@@ -75,6 +75,14 @@ run-server: build-server
 
 test:
 	$(GO) test ./... -race -cover
+
+# Run tests with JSON output to test_result.json (parseable, no TTY needed)
+test-json:
+	$(GO) test ./... -json -count=1 -timeout 60s 2>&1 | tee test_result.jsonl
+
+# Run unit tests only (storage, server, client), faster
+test-unit:
+	$(GO) test ./internal/storage ./internal/server ./internal/client -v -count=1 -timeout 30s
 
 vet:
 	$(GO) vet ./...

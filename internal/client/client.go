@@ -18,6 +18,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github-hub/internal/storage"
 )
 
 // Client is a minimal HTTP API client for the ghh server.
@@ -181,6 +183,25 @@ func (c *Client) Download(ctx context.Context, repo, branch, zipPath, extractDir
 		}
 	}
 
+	// Fetch and write info.json (repo, branch, commit_sha, commit_message, changed_files)
+	infoPath := ""
+	if extractDir != "" {
+		infoPath = filepath.Join(extractDir, "info.json")
+	} else {
+		base := strings.TrimSuffix(filepath.Base(zipPath), ".zip")
+		infoPath = filepath.Join(filepath.Dir(zipPath), base+".info.json")
+	}
+	if info := c.fetchDownloadInfo(ctx, repo, branch); info != nil {
+		b, err := json.MarshalIndent(info, "", "  ")
+		if err == nil {
+			if err := os.WriteFile(infoPath, b, 0o644); err != nil {
+				fmt.Printf("warning: failed to save info to %s: %v\n", infoPath, err)
+			} else {
+				fmt.Printf("saved info to %s\n", infoPath)
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -298,6 +319,44 @@ func (c *Client) fetchCommit(ctx context.Context, repo, branch string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(b))
+}
+
+func (c *Client) fetchDownloadInfo(ctx context.Context, repo, branch string) *storage.RepoInfo {
+	path := c.Endpoint.DownloadInfo
+	if path == "" {
+		path = "/api/v1/download/info"
+	}
+	q := url.Values{}
+	q.Set("repo", repo)
+	if strings.TrimSpace(branch) != "" {
+		q.Set("branch", branch)
+	}
+	if c.Legacy {
+		q.Set("legacy", "true")
+	}
+	endpoint := c.fullURL(path, q)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil
+	}
+	c.addAuth(req)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil
+	}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil
+	}
+	var info storage.RepoInfo
+	if err := json.Unmarshal(b, &info); err != nil {
+		return nil
+	}
+	return &info
 }
 
 // SwitchBranch requests a branch switch on the server for the given repo.
@@ -420,6 +479,7 @@ func (c *Client) addAuth(req *http.Request) {
 type Endpoints struct {
 	Download        string
 	DownloadCommit  string
+	DownloadInfo    string
 	DownloadSparse  string
 	BranchSwitch    string
 	DirList         string
@@ -432,6 +492,7 @@ func DefaultEndpoints() Endpoints {
 	return Endpoints{
 		Download:        "/api/v1/download",
 		DownloadCommit:  "/api/v1/download/commit",
+		DownloadInfo:    "/api/v1/download/info",
 		DownloadSparse:  "/api/v1/download/sparse",
 		BranchSwitch:    "/api/v1/branch/switch",
 		DirList:         "/api/v1/dir/list",

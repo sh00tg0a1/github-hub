@@ -1,14 +1,21 @@
 # syntax=docker/dockerfile:1
 
 FROM golang:1.21-alpine AS builder
+RUN apk add --no-cache git
 WORKDIR /src
 COPY go.mod ./
 # No external deps for now; keep step for future modules
 RUN --mount=type=cache,target=/go/pkg/mod go mod download || true
 COPY . .
+ARG VERSION=dev
+ARG COMMIT=""
+ARG BUILD_DATE=""
 RUN --mount=type=cache,target=/go/pkg/mod \
-    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/ghh-server ./cmd/ghh-server && \
-    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/ghh ./cmd/ghh
+    if [ -z "$COMMIT" ]; then COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown"); fi && \
+    if [ -z "$BUILD_DATE" ]; then BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ); fi && \
+    LDFLAGS="-s -w -X github-hub/internal/version.Version=${VERSION} -X github-hub/internal/version.Commit=${COMMIT} -X github-hub/internal/version.BuildDate=${BUILD_DATE}" && \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="${LDFLAGS}" -o /out/ghh-server ./cmd/ghh-server && \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="${LDFLAGS}" -o /out/ghh ./cmd/ghh
 
 FROM alpine:3.19
 RUN apk add --no-cache ca-certificates tzdata git \

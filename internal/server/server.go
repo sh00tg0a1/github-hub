@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github-hub/internal/storage"
+	"github-hub/internal/version"
 )
 
 const defaultDownloadTimeout = 30 * time.Minute
@@ -92,6 +93,7 @@ func NewServerWithStore(store Store, githubToken, defaultUser string) *Server {
 }
 
 func (s *Server) RegisterRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/api/v1/version", handleVersion)
 	mux.HandleFunc("/api/v1/download", s.handleDownload)
 	mux.HandleFunc("/api/v1/download/commit", s.handleDownloadCommit)
 	mux.HandleFunc("/api/v1/download/info", s.handleDownloadInfo)
@@ -103,6 +105,20 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	// Static UI for browsing cached workspace
 	sub, _ := fs.Sub(uiFS, "static")
 	mux.Handle("/", http.FileServer(http.FS(sub)))
+}
+
+func handleVersion(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	info := map[string]string{
+		"version":    version.Version,
+		"commit":     version.Commit,
+		"build_date": version.BuildDate,
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(info)
 }
 
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {

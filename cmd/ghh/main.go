@@ -262,6 +262,30 @@ func main() {
 			exitErr(err)
 		}
 
+	case "version":
+		fmt.Printf("client: %s\n", version.String())
+		info, err := client.ServerVersion(ctx)
+		if err != nil {
+			fmt.Printf("server: unavailable (%v)\n", err)
+		} else {
+			sv := strings.TrimSpace(info["version"])
+			if sv == "" {
+				sv = "unknown"
+			}
+			parts := []string{sv}
+			if c := strings.TrimSpace(info["commit"]); c != "" {
+				parts = append(parts, "commit="+c)
+			}
+			if d := strings.TrimSpace(info["build_date"]); d != "" {
+				parts = append(parts, "date="+d)
+			}
+			if len(parts) > 1 {
+				fmt.Printf("server: %s (%s)\n", parts[0], strings.Join(parts[1:], ", "))
+			} else {
+				fmt.Printf("server: %s\n", parts[0])
+			}
+		}
+
 	case "help", "-h", "--help":
 		printUsage()
 	default:
@@ -316,6 +340,7 @@ Commands:
   switch           Switch repository branch on server
   ls               List remote directory contents (path is relative to user root; no leading "users/")
   rm               Delete remote directory (use -r for recursive)
+  version          Show client and server version info
   help             Show this help message
 
 Global Flags:

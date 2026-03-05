@@ -466,6 +466,33 @@ func (c *Client) DeleteDir(ctx context.Context, path string, recursive bool) err
 	return nil
 }
 
+// ServerVersion fetches the server's version info.
+func (c *Client) ServerVersion(ctx context.Context) (map[string]string, error) {
+	path := c.Endpoint.ServerVersion
+	if path == "" {
+		path = "/api/v1/version"
+	}
+	u := c.BaseURL + path
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	c.addAuth(req)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("server returned %d", resp.StatusCode)
+	}
+	var info map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		return nil, err
+	}
+	return info, nil
+}
+
 func (c *Client) addAuth(req *http.Request) {
 	if strings.TrimSpace(c.Token) != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)

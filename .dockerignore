@@ -1,6 +1,6 @@
 .git
-bin
 data
+mysql-data
 **/*.tmp
 **/*.log
 node_modules

@@ -1,0 +1,43 @@
+# Multi-stage build for quality-server
+# Stage 1: Build Go binary
+FROM golang:1.24-alpine AS builder
+
+# Install build dependencies
+RUN apk add --no-cache git make
+
+WORKDIR /build
+
+ENV GOPROXY=https://goproxy.cn,direct
+
+# Copy go mod files
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source code
+COPY cmd/quality-server ./cmd/quality-server/
+COPY internal ./internal
+
+# Build the binary
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    -ldflags="-s -w" \
+    -o quality-server \
+    ./cmd/quality-server
+
+# Stage 2: Runtime image
+FROM alpine:3.19
+
+RUN addgroup -S app && adduser -S -G app app
+WORKDIR /app
+
+# Copy binary from builder
+COPY --from=builder /build/quality-server /app/
+COPY internal/quality/data /usr/local/share/quality-data
+
+RUN chmod +x /app/quality-server && \
+    mkdir -p /data && chown -R app:app /data /app
+
+USER app
+EXPOSE 5001
+VOLUME ["/data"]
+ENV GITHUB_TOKEN=""
+CMD ["/app/quality-server", "-addr", ":5001"]

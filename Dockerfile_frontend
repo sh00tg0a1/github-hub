@@ -1,0 +1,15 @@
+FROM nginx:latest
+
+RUN rm /etc/nginx/conf.d/default.conf
+
+
+
+# 复制构建结果到Nginx静态资源目录
+COPY frontend/dist /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/conf.d/
+
+# 暴露端口
+EXPOSE 80
+
+# 启动Nginx服务
+CMD ["nginx", "-g", "daemon off;"]

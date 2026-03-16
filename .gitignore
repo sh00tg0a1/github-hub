@@ -1,7 +1,10 @@
-# If you prefer the allow list template instead of the deny list, see community template:
-# https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
-#
+# =============================================================================
+# GitHub-Hub Project .gitignore
+# =============================================================================
+
+# -----------------------------------------------------------------------------
 # Binaries for programs and plugins
+# -----------------------------------------------------------------------------
 *.exe
 *.exe~
 *.dll
@@ -17,21 +20,113 @@ coverage.*
 *.coverprofile
 profile.cov
 
-# Dependency directories (remove the comment below to include it)
-# vendor/
+# -----------------------------------------------------------------------------
+# Go specific
+# -----------------------------------------------------------------------------
+# Dependency directories
+vendor/
 
 # Go workspace file
 go.work
 go.work.sum
 
-# env file
-.env
-
-# Editor/IDE
-# .idea/
-# .vscode/
-
+# Build output
 bin/
 
-# Test environment
-test_env/**
+# -----------------------------------------------------------------------------
+# Frontend (React + Vite)
+# -----------------------------------------------------------------------------
+# Node dependencies
+frontend/node_modules/
+frontend/.pnpm-store/
+
+# Build output
+frontend/build/
+
+# Debug logs
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
+frontend/pnpm-debug.log*
+
+# Local env files
+frontend/.env
+frontend/.env.local
+frontend/.env.*.local
+
+# -----------------------------------------------------------------------------
+# Data directories (IMPORTANT: Contains database and cache)
+# -----------------------------------------------------------------------------
+data/
+mysql-data/
+
+# -----------------------------------------------------------------------------
+# Docker
+# -----------------------------------------------------------------------------
+docker-images/
+
+# -----------------------------------------------------------------------------
+# Environment files
+# -----------------------------------------------------------------------------
+.env
+.env.local
+.env.*.local
+
+# -----------------------------------------------------------------------------
+# Editor/IDE
+# -----------------------------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Emacs
+*~
+\#*\#
+./\#*\#
+
+# Vim
+.netrwhist
+*.swp
+*.swo
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# -----------------------------------------------------------------------------
+# Logs
+# -----------------------------------------------------------------------------
+*.log
+logs/
+
+# -----------------------------------------------------------------------------
+# Operating System
+# -----------------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# -----------------------------------------------------------------------------
+# Temporary files
+# -----------------------------------------------------------------------------
+tmp/
+temp/
+*.tmp
+*.bak
+*.backup
+
+# -----------------------------------------------------------------------------
+# Test artifacts
+# -----------------------------------------------------------------------------
+test_env/
+*.test
+coverage.html
+coverage.txt
+docker-images-export/
